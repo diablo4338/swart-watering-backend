@@ -175,6 +175,9 @@ The first release requires an Android tag such as `app-v1.0.0`. See
 `swart-watering-android/README.md` for runner variables, signing files and the exact
 release procedure.
 
+Client build and test-publication commands are documented in
+`swart-watering-android/README.md` and live entirely in the Android repository.
+
 ## Quick Check
 
 ```bash
