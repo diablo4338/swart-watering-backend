@@ -81,6 +81,11 @@ services:
       SMART_WATERING_STATISTICS_TIMEZONE: ${SMART_WATERING_STATISTICS_TIMEZONE:-Europe/Berlin}
       SMART_WATERING_CONSUMPTION_DROP_THRESHOLD_PERCENT: ${SMART_WATERING_CONSUMPTION_DROP_THRESHOLD_PERCENT:-30}
       SMART_WATERING_CONSUMPTION_MEDIAN_DAYS: ${SMART_WATERING_CONSUMPTION_MEDIAN_DAYS:-5}
+      SMART_WATERING_ANDROID_RELEASES_DIR: /releases
+    volumes:
+      - smart-watering-data:/data
+      - ../smart_watering:/app/smart_watering:ro
+      - ${SMART_WATERING_ANDROID_RELEASES_DIR:-./releases}:/releases:ro
 
   cli:
     <<: *python-service

@@ -8,7 +8,7 @@ from starlette.exceptions import HTTPException
 from smart_watering.domain import SmartWateringError
 
 from .errors import PublicApiError
-from .routers import auth, devices, operations
+from .routers import app_releases, auth, devices, operations
 from .runtime import ApiRuntime
 
 
@@ -72,6 +72,7 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(auth.router)
+    app.include_router(app_releases.router)
     app.include_router(devices.router)
     app.include_router(operations.router)
     return app

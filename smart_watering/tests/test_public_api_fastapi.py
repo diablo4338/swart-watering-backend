@@ -1,3 +1,4 @@
+import json
 import tempfile
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -19,8 +20,54 @@ def make_client(temp_dir: str) -> tuple[TestClient, SmartWateringService]:
         google_allowed_domains=set(),
         prometheus_url="http://127.0.0.1:9090",
         statistics_timezone=ZoneInfo("Europe/Berlin"),
+        android_releases_dir=Path(temp_dir) / "releases",
     )
     return TestClient(create_app(ApiRuntime(cli, settings))), cli
+
+
+def test_android_release_metadata_and_download_are_public() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        releases_dir = Path(temp_dir) / "releases"
+        version_dir = releases_dir / "1001"
+        version_dir.mkdir(parents=True)
+        manifest = {
+            "version_name": "1.0.0",
+            "version_code": 1001,
+            "filename": "smart-watering-1.0.0-1001.apk",
+            "sha256": "abc",
+            "size": 3,
+            "published_at": "2026-08-04T00:00:00Z",
+            "git_commit": "deadbeef",
+        }
+        (version_dir / manifest["filename"]).write_bytes(b"apk")
+        (version_dir / "manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        (releases_dir / "latest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        client, _cli = make_client(temp_dir)
+
+        latest = client.get("/api/v2/app/latest")
+        download = client.get("/api/v2/app/releases/1001/download")
+
+        assert latest.status_code == 200
+        assert latest.json()["version_code"] == 1001
+        assert latest.json()["download_url"].endswith(
+            "/api/v2/app/releases/1001/download"
+        )
+        assert download.status_code == 200
+        assert download.content == b"apk"
+
+
+def test_android_release_returns_not_found_before_first_publication() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        client, _cli = make_client(temp_dir)
+
+        response = client.get("/api/v2/app/latest")
+
+        assert response.status_code == 404
+        assert response.json()["error"] == "release_not_found"
 
 
 def test_fastapi_health_and_auth_contract() -> None:

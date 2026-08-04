@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from smart_watering.domain import SmartWateringError
@@ -16,11 +17,13 @@ PROMETHEUS_URL_ENV = "SMART_WATERING_PROMETHEUS_URL"
 STATISTICS_TIMEZONE_ENV = "SMART_WATERING_STATISTICS_TIMEZONE"
 CONSUMPTION_DROP_THRESHOLD_PERCENT_ENV = "SMART_WATERING_CONSUMPTION_DROP_THRESHOLD_PERCENT"
 CONSUMPTION_MEDIAN_DAYS_ENV = "SMART_WATERING_CONSUMPTION_MEDIAN_DAYS"
+ANDROID_RELEASES_DIR_ENV = "SMART_WATERING_ANDROID_RELEASES_DIR"
 DEFAULT_TOKEN_TTL_SEC = 3600
 DEFAULT_PROMETHEUS_URL = "http://127.0.0.1:9090"
 DEFAULT_STATISTICS_TIMEZONE = "Europe/Berlin"
 DEFAULT_CONSUMPTION_DROP_THRESHOLD_PERCENT = 30
 DEFAULT_CONSUMPTION_MEDIAN_DAYS = 5
+DEFAULT_ANDROID_RELEASES_DIR = "/releases"
 
 
 def parse_csv_env(raw_value: str) -> set[str]:
@@ -91,6 +94,7 @@ class ApiSettings:
     statistics_timezone: ZoneInfo
     consumption_drop_threshold_percent: int = DEFAULT_CONSUMPTION_DROP_THRESHOLD_PERCENT
     consumption_median_days: int = DEFAULT_CONSUMPTION_MEDIAN_DAYS
+    android_releases_dir: Path = Path(DEFAULT_ANDROID_RELEASES_DIR)
 
     @classmethod
     def from_env(cls) -> "ApiSettings":
@@ -112,4 +116,7 @@ class ApiSettings:
             statistics_timezone=statistics_timezone,
             consumption_drop_threshold_percent=consumption_drop_threshold_percent(),
             consumption_median_days=consumption_median_days(),
+            android_releases_dir=Path(
+                os.environ.get(ANDROID_RELEASES_DIR_ENV, DEFAULT_ANDROID_RELEASES_DIR)
+            ),
         )

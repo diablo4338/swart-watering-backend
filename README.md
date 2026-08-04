@@ -90,6 +90,7 @@ Android build configuration:
 | `SMART_WATERING_RELEASE_STORE_PASSWORD` | none | Android Gradle `local.properties` | Release signing keystore password. |
 | `SMART_WATERING_RELEASE_KEY_ALIAS` | none | Android Gradle `local.properties` | Release signing key alias. |
 | `SMART_WATERING_RELEASE_KEY_PASSWORD` | none | Android Gradle `local.properties` | Release signing key password. |
+| `SMART_WATERING_ANDROID_RELEASES_DIR` | `/srv/smart-watering/releases` in production example | self-hosted runner, public API Compose mount | Absolute host directory where signed Android releases and `latest.json` are published. Runner and backend must use the same path. |
 
 Smoke tests and helper scripts:
 
@@ -151,6 +152,28 @@ Build and push Docker Hub images from a source checkout:
 docker login
 make publish
 ```
+
+## Android Release Publishing
+
+The Android repository in `swart-watering-android/` contains a self-hosted GitHub
+Actions workflow. A successful run builds and signs an APK in Docker, publishes a
+versioned directory and atomically replaces `latest.json` in
+`SMART_WATERING_ANDROID_RELEASES_DIR`. The public API mounts that host directory
+read-only and exposes:
+
+- `GET /api/v2/app/latest` — current version metadata and download URL;
+- `GET /api/v2/app/releases/{version_code}/download` — the signed APK.
+
+Because the runner, backend and Prometheus are on one machine, configure the same
+absolute directory (for example `/srv/smart-watering/releases`) as both the Android
+workflow's `RELEASES_DIR` repository variable and backend
+`SMART_WATERING_ANDROID_RELEASES_DIR`. No file transfer or extra release server is
+needed. Prometheus remains reachable from the containers through
+`http://host.docker.internal:9090`.
+
+The first release requires an Android tag such as `app-v1.0.0`. See
+`swart-watering-android/README.md` for runner variables, signing files and the exact
+release procedure.
 
 ## Quick Check
 
