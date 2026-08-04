@@ -1,0 +1,8 @@
+.idea
+firmware/build
+plant/build
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+examples/.env.smoke

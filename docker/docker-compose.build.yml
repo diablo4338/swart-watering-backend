@@ -1,0 +1,20 @@
+services:
+  smart-watering:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.node
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+
+  public-api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.public-api
+
+  cli:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cli

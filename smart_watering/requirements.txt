@@ -1,0 +1,7 @@
+alembic>=1.13,<2
+SQLAlchemy>=2.0,<3
+google-auth>=2.29,<3
+requests>=2.32,<3
+tzdata>=2024.1
+fastapi>=0.116,<1
+uvicorn[standard]>=0.35,<1

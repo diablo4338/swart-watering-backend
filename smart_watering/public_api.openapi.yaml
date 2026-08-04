@@ -1,0 +1,960 @@
+openapi: 3.0.3
+info:
+  title: Smart Watering Public API
+  version: "2.0"
+  description: Minimal public API used by the current mobile client. Only /api/v2 endpoints are supported.
+servers:
+  - url: https://api.example.com
+paths:
+  /healthz:
+    get:
+      summary: API health check
+      responses:
+        "200":
+          description: API process is running
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+  /api/v2/auth/login:
+    post:
+      summary: Create a JWT session with username/password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Session token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+  /api/v2/auth/google:
+    post:
+      summary: Create a JWT session with a Google ID token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GoogleLoginRequest"
+      responses:
+        "200":
+          description: Session token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+  /api/v2/auth/logout:
+    post:
+      summary: Revoke the current JWT session
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Session revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: logged_out
+  /api/v2/devices:
+    get:
+      summary: List registered devices
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Devices
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices]
+                properties:
+                  devices:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Device"
+  /api/v2/device-types:
+    get:
+      summary: List supported device types
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Device types
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [types]
+                properties:
+                  types:
+                    type: array
+                    items:
+                      type: string
+                    example: [plant, tank]
+  /api/v2/devices/{device}/status/latest:
+    get:
+      summary: Return the latest stored status snapshot
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      responses:
+        "200":
+          description: Latest status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LatestStatusResponse"
+  /api/v2/devices/{device}/status/live:
+    get:
+      summary: Return a direct live controller status read
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      responses:
+        "200":
+          description: Live status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LatestStatusResponse"
+  /api/v2/devices/{device}/status:
+    post:
+      summary: Queue a device status snapshot read
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "202":
+          description: Queued operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+  /api/v2/devices/{device}/config:
+    post:
+      summary: Queue a device configuration update
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceConfigRequest"
+      responses:
+        "202":
+          description: Configuration command queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "400":
+          $ref: "#/components/responses/Error"
+  /api/v2/devices/{device}/sleep/enable:
+    post:
+      summary: Queue enabling controller sleep
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      responses:
+        "202":
+          description: Sleep-enable command queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+  /api/v2/devices/{device}/sleep/disable:
+    post:
+      summary: Queue disabling controller sleep
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      responses:
+        "202":
+          description: Sleep-disable command queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+  /api/v2/devices/{device}/sleep/interval:
+    post:
+      summary: Queue a controller sleep interval update
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SleepIntervalRequest"
+      responses:
+        "202":
+          description: Sleep interval command queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "400":
+          $ref: "#/components/responses/Error"
+  /api/v2/devices/{device}/zero:
+    post:
+      summary: Queue capture of the current scale zero
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      responses:
+        "202":
+          description: Zero-capture command queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+  /api/v2/devices/{device}/calibration:
+    post:
+      summary: Queue scale calibration with a known weight
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CalibrationRequest"
+      responses:
+        "202":
+          description: Calibration command queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "400":
+          $ref: "#/components/responses/Error"
+  /api/v2/devices/{device}/queue/clear:
+    post:
+      summary: Cancel and remove queued commands for a device
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      responses:
+        "200":
+          description: Queue cleared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueueClearResponse"
+  /api/v2/devices/{device}/watering/status:
+    get:
+      summary: Return direct-live normalized watering status
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      responses:
+        "200":
+          description: Watering status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WateringStatus"
+        "503":
+          $ref: "#/components/responses/Error"
+  /api/v2/devices/{device}/water-consumption:
+    get:
+      summary: Return day and night water-consumption periods for a plant
+      description: Day is 08:00-20:00 and night is 20:00-08:00 starting on the displayed date. Seven application days are returned. Values are average signed grams per hour calculated from all available samples. Increases above 10 g establish a new baseline and do not count as consumption. Future periods are null. The latest completed period is flagged when its absolute consumption is at least the configured percentage below the median of earlier completed periods of the same type in the configured calculation window.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      responses:
+        "200":
+          description: Water-consumption statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WaterConsumptionResponse"
+        "502":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /api/v2/devices/{device}/detected-waterings:
+    get:
+      summary: Return all valid automatically detected plant waterings
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Detected watering history, newest first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DetectedWateringListResponse"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/v2/devices/{device}/detected-waterings/{event_id}:
+    delete:
+      summary: Mark a false detected watering invalid
+      description: The record is retained so background scans cannot recreate it.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+        - name: event_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Event marked invalid
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, invalid]
+                properties:
+                  id:
+                    type: integer
+                  invalid:
+                    type: boolean
+                    enum: [true]
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/v2/devices/{device}/watering/last:
+    get:
+      summary: Return latest terminal watering operation
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      responses:
+        "200":
+          description: Latest terminal watering operation
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operation]
+                properties:
+                  operation:
+                    nullable: true
+                    allOf:
+                      - $ref: "#/components/schemas/Operation"
+  /api/v2/watering/history:
+    get:
+      summary: Return recent terminal watering operations
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: successful
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Return only successful watering operations when true
+      responses:
+        "200":
+          description: Recent terminal watering operations
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operations]
+                properties:
+                  operations:
+                    type: array
+                    maxItems: 10
+                    items:
+                      $ref: "#/components/schemas/Operation"
+  /api/v2/devices/{device}/watering/start:
+    post:
+      summary: Queue tank watering
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target_g]
+              properties:
+                target_g:
+                  type: number
+                  minimum: 0
+                  exclusiveMinimum: true
+      responses:
+        "202":
+          description: Queued operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+  /api/v2/devices/{device}/watering/stop:
+    post:
+      summary: Queue tank watering stop
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "202":
+          description: Queued operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+  /api/v2/devices/{device_name}/operations:
+    get:
+      summary: List recent operations for one device
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+        - name: active
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Device operations
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operations]
+                properties:
+                  operations:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Operation"
+  /api/v2/operations/{operation_id}:
+    get:
+      summary: Return one operation
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OperationId"
+      responses:
+        "200":
+          description: Operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/v2/operations/{operation_id}/events:
+    get:
+      summary: Return operation events
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OperationId"
+      responses:
+        "200":
+          description: Operation events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationEventsResponse"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    DeviceName:
+      name: device
+      in: path
+      required: true
+      schema:
+        type: string
+    OperationId:
+      name: operation_id
+      in: path
+      required: true
+      schema:
+        type: string
+  responses:
+    Error:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+    GoogleLoginRequest:
+      type: object
+      required: [id_token]
+      properties:
+        id_token:
+          type: string
+    LoginResponse:
+      type: object
+      required: [token, expires_at]
+      properties:
+        token:
+          type: string
+        expires_at:
+          type: number
+    Device:
+      type: object
+      required: [name, type, has_pending_operations]
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [plant, tank]
+        has_pending_operations:
+          type: boolean
+    DeviceInfo:
+      type: object
+      properties:
+        name:
+          type: string
+          nullable: true
+        type:
+          type: string
+          nullable: true
+    WateringInfo:
+      type: object
+      required: [active]
+      properties:
+        active:
+          type: boolean
+        state:
+          type: string
+          nullable: true
+        last_operation_type:
+          type: string
+          nullable: true
+        last_operation_status:
+          type: string
+          nullable: true
+    DeviceConfig:
+      type: object
+      properties:
+        target_g:
+          type: number
+          nullable: true
+        dry_weight_g:
+          type: number
+          nullable: true
+        tare_weight_g:
+          type: number
+          nullable: true
+        sleep_disabled:
+          type: boolean
+          nullable: true
+        sleep_interval_min:
+          type: integer
+          nullable: true
+    DeviceConfigRequest:
+      type: object
+      minProperties: 1
+      properties:
+        device_type:
+          type: string
+          enum: [plant, tank]
+        name:
+          type: string
+        dry_weight_g:
+          type: number
+        tare_weight_g:
+          type: number
+    SleepIntervalRequest:
+      type: object
+      required: [minutes]
+      properties:
+        minutes:
+          type: integer
+          minimum: 1
+          maximum: 50
+    CalibrationRequest:
+      type: object
+      required: [weight_g]
+      properties:
+        weight_g:
+          type: number
+          minimum: 0
+          exclusiveMinimum: true
+    QueueClearResponse:
+      type: object
+      required: [cleared]
+      properties:
+        cleared:
+          type: integer
+          minimum: 0
+    WaterConsumptionDay:
+      type: object
+      required:
+        [date, day, night, day_below_weekly_median, night_below_weekly_median]
+      properties:
+        date:
+          type: string
+          format: date
+        day:
+          type: number
+          nullable: true
+        night:
+          type: number
+          nullable: true
+        day_below_weekly_median:
+          type: boolean
+        night_below_weekly_median:
+          type: boolean
+    WaterConsumptionResponse:
+      type: object
+      required: [device, days]
+      properties:
+        device:
+          type: string
+        days:
+          type: array
+          minItems: 7
+          maxItems: 7
+          items:
+            $ref: "#/components/schemas/WaterConsumptionDay"
+    DetectedWatering:
+      type: object
+      required:
+        [id, occurred_at, weight_before_g, weight_after_g, amount_g, source]
+      properties:
+        id:
+          type: integer
+        occurred_at:
+          type: number
+          description: Unix timestamp of the new maximum/base weight.
+        weight_before_g:
+          type: number
+        weight_after_g:
+          type: number
+        amount_g:
+          type: number
+          exclusiveMinimum: true
+          minimum: 10
+        source:
+          type: string
+          enum: [prometheus]
+    DetectedWateringListResponse:
+      type: object
+      required: [device, waterings, next_offset]
+      properties:
+        device:
+          type: string
+        waterings:
+          type: array
+          items:
+            $ref: "#/components/schemas/DetectedWatering"
+        next_offset:
+          type: integer
+          nullable: true
+          description: Offset for the next page; null when the history is exhausted.
+    DeviceWeight:
+      type: object
+      properties:
+        gross_weight_g:
+          type: number
+          nullable: true
+        useful_weight_g:
+          type: number
+          nullable: true
+        water_used_g:
+          type: number
+          nullable: true
+    RawDeviceStatus:
+      type: object
+      required: [device, watering, config, weight]
+      properties:
+        device:
+          $ref: "#/components/schemas/DeviceInfo"
+        watering:
+          $ref: "#/components/schemas/WateringInfo"
+        config:
+          $ref: "#/components/schemas/DeviceConfig"
+        weight:
+          $ref: "#/components/schemas/DeviceWeight"
+    LatestStatusResponse:
+      type: object
+      required:
+        - device
+        - status
+        - source
+        - available
+        - result
+        - result_received_at
+        - operation_id
+        - pending_operation_id
+        - pending_operation_status
+        - error
+      properties:
+        device:
+          type: string
+        status:
+          type: string
+          description: Current connectivity for live responses; unknown for stored snapshots.
+          enum: [online, offline, unknown]
+        source:
+          type: string
+          enum: [live, snapshot, none]
+        available:
+          type: boolean
+          description: Whether this response contains a usable result; this does not indicate controller connectivity.
+        result:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/RawDeviceStatus"
+        result_received_at:
+          type: number
+          nullable: true
+        operation_id:
+          type: string
+          nullable: true
+        pending_operation_id:
+          type: string
+          nullable: true
+        pending_operation_status:
+          type: string
+          nullable: true
+        error:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/ApiError"
+    Operation:
+      type: object
+      required: [operation_id, device, type, status, updated_at, finished_at]
+      properties:
+        operation_id:
+          type: string
+        device:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+          enum: [queued, sending, accepted, running, success, error, timeout, cancelled]
+        target_g:
+          type: number
+        minutes:
+          type: integer
+        weight_g:
+          type: number
+        device_type:
+          type: string
+          enum: [plant, tank]
+        name:
+          type: string
+        dry_weight_g:
+          type: number
+        tare_weight_g:
+          type: number
+        updated_at:
+          type: number
+        finished_at:
+          type: number
+          nullable: true
+        error:
+          $ref: "#/components/schemas/OperationError"
+    OperationError:
+      type: object
+      required: [code, message, detail]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        detail:
+          type: string
+          nullable: true
+        retryable:
+          type: boolean
+          nullable: true
+    ApiError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        retryable:
+          type: boolean
+          nullable: true
+    OperationInfo:
+      type: object
+      properties:
+        type:
+          type: string
+          nullable: true
+        status:
+          type: string
+          nullable: true
+    PlannedWatering:
+      type: object
+      required: [operation_id, target_g, status]
+      properties:
+        operation_id:
+          type: string
+        target_g:
+          type: number
+        status:
+          type: string
+    WateringStatus:
+      allOf:
+        - type: object
+          required:
+            - device
+            - active
+            - state
+            - gap_g
+            - percent_complete
+            - last_operation
+            - source
+            - available
+            - result_received_at
+            - operation_id
+            - pending_operation_id
+            - pending_operation_status
+            - planned_watering
+            - result
+          properties:
+            device:
+              $ref: "#/components/schemas/DeviceInfo"
+            active:
+              type: boolean
+            state:
+              type: string
+              nullable: true
+            gap_g:
+              type: number
+              nullable: true
+            percent_complete:
+              type: number
+              nullable: true
+            last_operation:
+              $ref: "#/components/schemas/OperationInfo"
+            source:
+              type: string
+              enum: [live, snapshot]
+            available:
+              type: boolean
+            result_received_at:
+              type: number
+            operation_id:
+              type: string
+              nullable: true
+            pending_operation_id:
+              type: string
+              nullable: true
+            pending_operation_status:
+              type: string
+              nullable: true
+            planned_watering:
+              nullable: true
+              allOf:
+                - $ref: "#/components/schemas/PlannedWatering"
+            result:
+              $ref: "#/components/schemas/RawDeviceStatus"
+    OperationEventsResponse:
+      type: object
+      required: [operation_id, events]
+      properties:
+        operation_id:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperationEvent"
+    OperationEvent:
+      type: object
+      required: [status, message]
+      properties:
+        status:
+          type: string
+        message:
+          type: string
+    ErrorResponse:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
