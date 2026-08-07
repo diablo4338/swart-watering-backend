@@ -184,7 +184,7 @@ class PlantWateringEventStore:
     FIELDS = (
         "id", "device_name", "event_start_at", "occurred_at",
         "weight_before_g", "weight_after_g", "amount_g", "source",
-        "invalid", "detected_at", "updated_at",
+        "fertilized", "invalid", "detected_at", "updated_at",
     )
 
     def __init__(self, store: SQLiteStore) -> None:
@@ -193,6 +193,7 @@ class PlantWateringEventStore:
     @classmethod
     def to_mapping(cls, row: PlantWateringEventRecord) -> dict[str, Any]:
         result = record_to_mapping(row, cls.FIELDS)
+        result["fertilized"] = bool(result["fertilized"])
         result["invalid"] = bool(result["invalid"])
         return result
 
@@ -227,6 +228,7 @@ class PlantWateringEventStore:
                     weight_after_g=event["weight_after_g"],
                     amount_g=event["amount_g"],
                     source="prometheus",
+                    fertilized=0,
                     invalid=0,
                     detected_at=now,
                     updated_at=now,
@@ -284,6 +286,25 @@ class PlantWateringEventStore:
                 ).values(invalid=1, updated_at=now)
             )
         return bool(result.rowcount)
+
+    def set_fertilized(
+        self, device_name: str, event_id: int, fertilized: bool
+    ) -> dict[str, Any] | None:
+        now = time.time()
+        with self.store.session() as session:
+            row = session.scalar(
+                select(PlantWateringEventRecord).where(
+                    PlantWateringEventRecord.id == event_id,
+                    PlantWateringEventRecord.device_name == device_name,
+                    PlantWateringEventRecord.invalid == 0,
+                )
+            )
+            if row is None:
+                return None
+            row.fertilized = int(fertilized)
+            row.updated_at = now
+            session.flush()
+            return self.to_mapping(row)
 
     def invalidate_above_amount(self, device_name: str, max_amount_g: float) -> int:
         now = time.time()

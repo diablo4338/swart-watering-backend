@@ -1,6 +1,6 @@
 from typing import Any
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Body, Query, status
 
 from smart_watering.domain import DEVICE_TYPES
 
@@ -53,6 +53,19 @@ def invalidate_detected_watering(
     _session: SessionDep,
 ) -> dict[str, Any]:
     return api.service.invalidate_detected_watering(device_name, event_id)
+
+
+@router.put("/devices/{device_name}/detected-waterings/{event_id}/fertilized")
+def set_detected_watering_fertilized(
+    device_name: str,
+    event_id: int,
+    api: RuntimeDep,
+    _session: SessionDep,
+    fertilized: bool = Body(embed=True),
+) -> dict[str, Any]:
+    return api.service.set_detected_watering_fertilized(
+        device_name, event_id, fertilized
+    )
 
 
 @router.get("/devices/{device_name}/status/latest")

@@ -130,6 +130,7 @@ class PlantWateringEventRecord(Base):
     weight_after_g: Mapped[float] = mapped_column(Float, nullable=False)
     amount_g: Mapped[float] = mapped_column(Float, nullable=False)
     source: Mapped[str] = mapped_column(String, nullable=False)
+    fertilized: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     invalid: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     detected_at: Mapped[float] = mapped_column(Float, nullable=False)
     updated_at: Mapped[float] = mapped_column(Float, nullable=False)

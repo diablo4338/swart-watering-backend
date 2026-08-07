@@ -376,6 +376,43 @@ paths:
                     enum: [true]
         "404":
           $ref: "#/components/responses/Error"
+  /api/v2/devices/{device}/detected-waterings/{event_id}/fertilized:
+    put:
+      summary: Set whether fertilizer was added during a detected watering
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+        - name: event_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fertilized]
+              properties:
+                fertilized:
+                  type: boolean
+      responses:
+        "200":
+          description: Fertilizer marker updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, fertilized]
+                properties:
+                  id:
+                    type: integer
+                  fertilized:
+                    type: boolean
+        "404":
+          $ref: "#/components/responses/Error"
   /api/v2/devices/{device}/watering/last:
     get:
       summary: Return latest terminal watering operation
@@ -695,7 +732,7 @@ components:
     DetectedWatering:
       type: object
       required:
-        [id, occurred_at, weight_before_g, weight_after_g, amount_g, source]
+        [id, occurred_at, weight_before_g, weight_after_g, amount_g, source, fertilized]
       properties:
         id:
           type: integer
@@ -713,6 +750,9 @@ components:
         source:
           type: string
           enum: [prometheus]
+        fertilized:
+          type: boolean
+          default: false
     DetectedWateringListResponse:
       type: object
       required: [device, waterings, next_offset]

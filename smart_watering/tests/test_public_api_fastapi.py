@@ -186,6 +186,51 @@ def test_detected_watering_history_is_paginated() -> None:
         assert second["next_offset"] is None
 
 
+def test_detected_watering_can_be_marked_fertilized() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        client, cli = make_client(temp_dir)
+        cli.auth.add_user("client", "secret-password")
+        cli.registry.add("10.0.0.1", "plant", "plant_1")
+        token = client.post(
+            "/api/v2/auth/login",
+            json={"username": "client", "password": "secret-password"},
+        ).json()["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        event, _created = cli.plant_waterings.upsert_detected(
+            "plant_1",
+            {
+                "event_start_at": 100.0,
+                "occurred_at": 200.0,
+                "weight_before_g": 100.0,
+                "weight_after_g": 130.0,
+                "amount_g": 30.0,
+            },
+        )
+
+        before = client.get(
+            "/api/v2/devices/plant_1/detected-waterings", headers=headers
+        ).json()["waterings"][0]
+        updated = client.put(
+            f"/api/v2/devices/plant_1/detected-waterings/{event['id']}/fertilized",
+            json={"fertilized": True},
+            headers=headers,
+        )
+        after = client.get(
+            "/api/v2/devices/plant_1/detected-waterings", headers=headers
+        ).json()["waterings"][0]
+        cleared = client.put(
+            f"/api/v2/devices/plant_1/detected-waterings/{event['id']}/fertilized",
+            json={"fertilized": False},
+            headers=headers,
+        )
+
+        assert before["fertilized"] is False
+        assert updated.status_code == 200
+        assert updated.json() == {"id": event["id"], "fertilized": True}
+        assert after["fertilized"] is True
+        assert cleared.json() == {"id": event["id"], "fertilized": False}
+
+
 def test_fastapi_operations_filter_by_device() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         client, cli = make_client(temp_dir)

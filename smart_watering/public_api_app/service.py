@@ -361,6 +361,7 @@ class PublicApiService:
                     for key in (
                         "id", "occurred_at", "weight_before_g",
                         "weight_after_g", "amount_g", "source",
+                        "fertilized",
                     )
                 }
                 for event in events
@@ -379,3 +380,22 @@ class PublicApiService:
                 "detected_watering_not_found",
             )
         return {"id": event_id, "invalid": True}
+
+    def set_detected_watering_fertilized(
+        self, device_name: str, event_id: int, fertilized: bool
+    ) -> dict[str, Any]:
+        device = self.app.registry.get(device_name)
+        if device.device_type != "plant":
+            raise PublicApiError(
+                f"device '{device.name}' is not a plant", 404, "not_a_plant"
+            )
+        event = self.app.plant_waterings.set_fertilized(
+            device.name, event_id, fertilized
+        )
+        if event is None:
+            raise PublicApiError(
+                f"detected watering '{event_id}' does not exist",
+                404,
+                "detected_watering_not_found",
+            )
+        return {"id": event_id, "fertilized": event["fertilized"]}
