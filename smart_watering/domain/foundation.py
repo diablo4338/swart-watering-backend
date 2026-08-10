@@ -42,7 +42,10 @@ class DeviceType(StrEnum):
 
 
 DEVICE_TYPES = frozenset(device_type.value for device_type in DeviceType)
-CONFIG_FLOAT_KEYS = {"tare_weight_g", "dry_weight_g"}
+CONFIG_FLOAT_KEYS = {
+    "tare_weight_g", "dry_weight_g", "wet_weight_g",
+    "watering_loss_threshold_percent",
+}
 CONFIG_STRING_KEYS = {"device_type", "name"}
 CONFIG_KEYS = CONFIG_FLOAT_KEYS | CONFIG_STRING_KEYS
 OP_QUEUED = "queued"

@@ -30,6 +30,8 @@ static const char *TAG = "watering";
 #define DEVICE_TYPE_NVS_KEY "device_type"
 #define DEVICE_NAME_NVS_KEY "device_name"
 #define DRY_WEIGHT_NVS_KEY "dry_weight"
+#define WET_WEIGHT_NVS_KEY "wet_weight"
+#define WATERING_LOSS_THRESHOLD_NVS_KEY "water_loss_pct"
 #define DEFAULT_DEVICE_NAME "plant"
 
 typedef struct {
@@ -58,6 +60,8 @@ typedef struct {
     float water_used_g;
     float tare_weight_g;
     float dry_weight_g;
+    float wet_weight_g;
+    float watering_loss_threshold_percent;
     float tare_tolerance_g;
     float gross_weight_g;
     bool led_on;
@@ -101,6 +105,8 @@ static watering_runtime_status_t g_status = {
     .water_used_g = 0.0f,
     .tare_weight_g = DEFAULT_TARE_WEIGHT_G,
     .dry_weight_g = 0.0f,
+    .wet_weight_g = 0.0f,
+    .watering_loss_threshold_percent = 0.0f,
     .tare_tolerance_g = TARE_TOLERANCE_G,
     .gross_weight_g = 0.0f,
     .led_on = false,
@@ -259,14 +265,20 @@ static void load_device_config_from_nvs(void)
     uint8_t device_type = DEVICE_TYPE_PLANT;
     char device_name[sizeof(g_status.device_name)] = DEFAULT_DEVICE_NAME;
     float dry_weight_g = 0.0f;
+    float wet_weight_g = 0.0f;
+    float watering_loss_threshold_percent = 0.0f;
     size_t device_name_size = sizeof(device_name);
     size_t dry_weight_size = sizeof(dry_weight_g);
+    size_t wet_weight_size = sizeof(wet_weight_g);
+    size_t watering_loss_threshold_size = sizeof(watering_loss_threshold_percent);
     esp_err_t err = nvs_open(TARE_NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
 
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         g_status.device_type = DEVICE_TYPE_PLANT;
         snprintf(g_status.device_name, sizeof(g_status.device_name), "%s", DEFAULT_DEVICE_NAME);
         g_status.dry_weight_g = 0.0f;
+        g_status.wet_weight_g = 0.0f;
+        g_status.watering_loss_threshold_percent = 0.0f;
         return;
     }
 
@@ -275,6 +287,8 @@ static void load_device_config_from_nvs(void)
         g_status.device_type = DEVICE_TYPE_PLANT;
         snprintf(g_status.device_name, sizeof(g_status.device_name), "%s", DEFAULT_DEVICE_NAME);
         g_status.dry_weight_g = 0.0f;
+        g_status.wet_weight_g = 0.0f;
+        g_status.watering_loss_threshold_percent = 0.0f;
         return;
     }
 
@@ -302,6 +316,21 @@ static void load_device_config_from_nvs(void)
         dry_weight_g = 0.0f;
     }
 
+    err = nvs_get_blob(nvs_handle, WET_WEIGHT_NVS_KEY, &wet_weight_g, &wet_weight_size);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "failed to read wet weight: %s", esp_err_to_name(err));
+        wet_weight_g = 0.0f;
+    }
+
+    err = nvs_get_blob(
+        nvs_handle, WATERING_LOSS_THRESHOLD_NVS_KEY,
+        &watering_loss_threshold_percent, &watering_loss_threshold_size
+    );
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "failed to read watering loss threshold: %s", esp_err_to_name(err));
+        watering_loss_threshold_percent = 0.0f;
+    }
+
     nvs_close(nvs_handle);
 
     if (device_type != DEVICE_TYPE_PLANT && device_type != DEVICE_TYPE_TANK) {
@@ -313,10 +342,16 @@ static void load_device_config_from_nvs(void)
     if (dry_weight_g < 0.0f) {
         dry_weight_g = 0.0f;
     }
+    if (wet_weight_g < 0.0f) wet_weight_g = 0.0f;
+    if (watering_loss_threshold_percent < 0.0f || watering_loss_threshold_percent > 100.0f) {
+        watering_loss_threshold_percent = 0.0f;
+    }
 
     g_status.device_type = (device_type_t)device_type;
     snprintf(g_status.device_name, sizeof(g_status.device_name), "%s", device_name);
     g_status.dry_weight_g = dry_weight_g;
+    g_status.wet_weight_g = wet_weight_g;
+    g_status.watering_loss_threshold_percent = watering_loss_threshold_percent;
 }
 
 static bool save_tare_config_to_nvs(float tare_weight_g)
@@ -444,7 +479,9 @@ static bool save_runtime_config_to_nvs(
     const char *device_name,
     float dry_weight_g,
     float tare_weight_g,
-    bool has_tare_weight_g
+    bool has_tare_weight_g,
+    float wet_weight_g,
+    float watering_loss_threshold_percent
 )
 {
     nvs_handle_t nvs_handle = 0;
@@ -465,6 +502,15 @@ static bool save_runtime_config_to_nvs(
     }
     if (err == ESP_OK) {
         err = nvs_set_blob(nvs_handle, DRY_WEIGHT_NVS_KEY, &dry_weight_g, sizeof(dry_weight_g));
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_blob(nvs_handle, WET_WEIGHT_NVS_KEY, &wet_weight_g, sizeof(wet_weight_g));
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_blob(
+            nvs_handle, WATERING_LOSS_THRESHOLD_NVS_KEY,
+            &watering_loss_threshold_percent, sizeof(watering_loss_threshold_percent)
+        );
     }
     if (err == ESP_OK) {
         err = nvs_commit(nvs_handle);
@@ -695,6 +741,8 @@ void watering_get_status(watering_status_t *snapshot)
     snapshot->water_used_g = g_status.water_used_g;
     snapshot->tare_weight_g = g_status.tare_weight_g;
     snapshot->dry_weight_g = g_status.dry_weight_g;
+    snapshot->wet_weight_g = g_status.wet_weight_g;
+    snapshot->watering_loss_threshold_percent = g_status.watering_loss_threshold_percent;
     snapshot->tare_tolerance_g = g_status.tare_tolerance_g;
     snapshot->gross_weight_g = g_status.gross_weight_g;
     snapshot->led_on = g_status.led_on;
@@ -1530,14 +1578,22 @@ bool watering_set_runtime_config(
     float tare_weight_g,
     bool has_tare_weight_g,
     float dry_weight_g,
-    bool has_dry_weight_g
+    bool has_dry_weight_g,
+    float wet_weight_g,
+    bool has_wet_weight_g,
+    float watering_loss_threshold_percent,
+    bool has_watering_loss_threshold_percent
 )
 {
     if (device_name == NULL || device_name[0] == '\0') {
         return false;
     }
 
-    if ((has_tare_weight_g && tare_weight_g < 0.0f) || (has_dry_weight_g && dry_weight_g < 0.0f)) {
+    if ((has_tare_weight_g && tare_weight_g < 0.0f)
+        || (has_dry_weight_g && dry_weight_g < 0.0f)
+        || (has_wet_weight_g && wet_weight_g < 0.0f)
+        || (has_watering_loss_threshold_percent
+            && (watering_loss_threshold_percent < 0.0f || watering_loss_threshold_percent > 100.0f))) {
         return false;
     }
 
@@ -1547,6 +1603,9 @@ bool watering_set_runtime_config(
 
     float final_tare_weight_g = has_tare_weight_g ? tare_weight_g : 0.0f;
     float final_dry_weight_g = has_dry_weight_g ? dry_weight_g : 0.0f;
+    float final_wet_weight_g = has_wet_weight_g ? wet_weight_g : 0.0f;
+    float final_watering_loss_threshold_percent =
+        has_watering_loss_threshold_percent ? watering_loss_threshold_percent : 0.0f;
 
     xSemaphoreTake(g_status.mutex, portMAX_DELAY);
     if (!has_tare_weight_g) {
@@ -1555,6 +1614,10 @@ bool watering_set_runtime_config(
     if (!has_dry_weight_g) {
         final_dry_weight_g = g_status.dry_weight_g;
     }
+    if (!has_wet_weight_g) final_wet_weight_g = g_status.wet_weight_g;
+    if (!has_watering_loss_threshold_percent) {
+        final_watering_loss_threshold_percent = g_status.watering_loss_threshold_percent;
+    }
     xSemaphoreGive(g_status.mutex);
 
     if (!save_runtime_config_to_nvs(
@@ -1562,7 +1625,9 @@ bool watering_set_runtime_config(
             device_name,
             final_dry_weight_g,
             final_tare_weight_g,
-            has_tare_weight_g)) {
+            has_tare_weight_g,
+            final_wet_weight_g,
+            final_watering_loss_threshold_percent)) {
         xSemaphoreTake(g_status.mutex, portMAX_DELAY);
         g_status.last_operation_type = WATERING_OP_CONFIG;
         g_status.last_operation_status = WATERING_OP_STATUS_FAILED;
@@ -1578,6 +1643,8 @@ bool watering_set_runtime_config(
         g_status.tare_weight_g = final_tare_weight_g;
     }
     g_status.dry_weight_g = final_dry_weight_g;
+    g_status.wet_weight_g = final_wet_weight_g;
+    g_status.watering_loss_threshold_percent = final_watering_loss_threshold_percent;
     g_status.last_operation_type = WATERING_OP_CONFIG;
     g_status.last_operation_status = WATERING_OP_STATUS_COMPLETED;
     snprintf(g_status.detail, sizeof(g_status.detail), "%s", "config_updated");

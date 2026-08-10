@@ -155,7 +155,7 @@ static bool parse_tare_weight_g(const char *body, float *tare_weight_g)
 static bool parse_dry_weight_g(const char *body, float *dry_weight_g)
 {
     if (parse_float_value(body, "dry_weight_g", dry_weight_g)) {
-        return *dry_weight_g >= 0.0f;
+        return *dry_weight_g >= 0.0f && floorf(*dry_weight_g) == *dry_weight_g;
     }
 
     return false;
@@ -524,7 +524,9 @@ static esp_err_t watering_get_handler(httpd_req_t *req)
         "\"config\":{"
             "\"target_g\":%.2f,"
             "\"tare_weight_g\":%.2f,"
-            "\"dry_weight_g\":%.2f,"
+            "\"dry_weight_g\":%.0f,"
+            "\"wet_weight_g\":%.0f,"
+            "\"watering_loss_threshold_percent\":%.0f,"
             "\"zero_raw\":%ld,"
             "\"raw_per_gram\":%.6f,"
             "\"sleep_disabled\":%s,"
@@ -545,6 +547,8 @@ static esp_err_t watering_get_handler(httpd_req_t *req)
         (double)snapshot.target_g,
         (double)snapshot.tare_weight_g,
         (double)snapshot.dry_weight_g,
+        (double)snapshot.wet_weight_g,
+        (double)snapshot.watering_loss_threshold_percent,
         (long)snapshot.zero_raw,
         (double)snapshot.raw_per_gram,
         snapshot.sleep_disabled ? "true" : "false",
@@ -788,8 +792,12 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     device_type_t device_type = DEVICE_TYPE_PLANT;
     float tare_weight_g = 0.0f;
     float dry_weight_g = 0.0f;
+    float wet_weight_g = 0.0f;
+    float watering_loss_threshold_percent = 0.0f;
     bool has_tare_weight_g = false;
     bool has_dry_weight_g = false;
+    bool has_wet_weight_g = false;
+    bool has_watering_loss_threshold_percent = false;
     bool has_device_type = false;
     bool has_device_name = false;
     watering_status_t snapshot = {0};
@@ -833,7 +841,24 @@ static esp_err_t config_post_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req, "{\"error\":\"invalid_dry_weight_g\"}");
     }
 
-    if (!has_device_type && !has_device_name && !has_tare_weight_g && !has_dry_weight_g) {
+    has_wet_weight_g = body_has_field(body, "wet_weight_g");
+    if (has_wet_weight_g && (!parse_float_value(body, "wet_weight_g", &wet_weight_g)
+        || wet_weight_g < 0.0f || floorf(wet_weight_g) != wet_weight_g)) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"error\":\"invalid_wet_weight_g\"}");
+    }
+
+    has_watering_loss_threshold_percent = body_has_field(body, "watering_loss_threshold_percent");
+    if (has_watering_loss_threshold_percent
+        && (!parse_float_value(body, "watering_loss_threshold_percent", &watering_loss_threshold_percent)
+            || watering_loss_threshold_percent < 0.0f || watering_loss_threshold_percent > 100.0f
+            || floorf(watering_loss_threshold_percent) != watering_loss_threshold_percent)) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"error\":\"invalid_watering_loss_threshold_percent\"}");
+    }
+
+    if (!has_device_type && !has_device_name && !has_tare_weight_g && !has_dry_weight_g
+        && !has_wet_weight_g && !has_watering_loss_threshold_percent) {
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(req, "{\"error\":\"empty_config\"}");
     }
@@ -844,7 +869,11 @@ static esp_err_t config_post_handler(httpd_req_t *req)
             tare_weight_g,
             has_tare_weight_g,
             dry_weight_g,
-            has_dry_weight_g)) {
+            has_dry_weight_g,
+            wet_weight_g,
+            has_wet_weight_g,
+            watering_loss_threshold_percent,
+            has_watering_loss_threshold_percent)) {
         web_queue_operation_callback(callback_url, operation_id, "error", "config_update_failed");
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(req, "{\"error\":\"config_update_failed\"}");

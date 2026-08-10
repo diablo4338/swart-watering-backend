@@ -22,10 +22,14 @@ static bool configure_watchdog(void)
         .trigger_panic = true,
     };
 
+#if CONFIG_ESP_TASK_WDT_INIT
+    esp_err_t err = esp_task_wdt_reconfigure(&config);
+#else
     esp_err_t err = esp_task_wdt_init(&config);
     if (err == ESP_ERR_INVALID_STATE) {
         err = esp_task_wdt_reconfigure(&config);
     }
+#endif
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "failed to configure task watchdog: %s", esp_err_to_name(err));

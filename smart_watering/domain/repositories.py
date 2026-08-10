@@ -8,7 +8,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from smart_watering.infrastructure.database import (
-    CommandQueueRecord, DeviceRecord, OperationEventRecord, OperationRecord,
+    CommandQueueRecord, DeviceRecord, DeviceWateringSettingsRecord, OperationEventRecord, OperationRecord,
     PlantWateringEventRecord, UserRecord, UserSessionRecord, record_to_mapping,
 )
 from .foundation import (
@@ -100,6 +100,40 @@ class DeviceRegistry:
 
         return Device(device_name, ip, base_url, device_type, now, now)
 
+    def upsert_discovered(self, ip_or_url: str, device_type: str, name: str) -> Device:
+        """Store the identity reported by an online controller without changing it."""
+        if device_type not in DEVICE_TYPES:
+            raise SmartWateringError(f"unsupported device type: {device_type}")
+        if not name:
+            raise SmartWateringError("device name must not be empty")
+
+        ip, base_url = self.normalize_base_url(ip_or_url)
+        now = time.time()
+        with self.store.session() as session:
+            existing = session.get(DeviceRecord, name)
+            if device_type == DeviceType.TANK:
+                self.demote_other_tanks(session, name, now)
+            if existing is None:
+                session.add(
+                    DeviceRecord(
+                        name=name,
+                        ip=ip,
+                        base_url=base_url,
+                        device_type=device_type,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                created_at = now
+            else:
+                existing.ip = ip
+                existing.base_url = base_url
+                existing.device_type = device_type
+                existing.updated_at = now
+                created_at = existing.created_at
+
+        return Device(name, ip, base_url, device_type, created_at, now)
+
     def validate_config_update(self, current_name: str, config: dict[str, Any]) -> Device:
         device = self.get(current_name)
         new_name = str(config.get("name", device.name))
@@ -178,6 +212,36 @@ class DeviceRegistry:
             result = session.execute(delete(DeviceRecord).where(DeviceRecord.name == name))
             if result.rowcount == 0:
                 raise SmartWateringError(f"unknown device: {name}")
+
+    def watering_settings(self, name: str) -> dict[str, float | None]:
+        self.get(name)
+        with self.store.session() as session:
+            row = session.get(DeviceWateringSettingsRecord, name)
+        keys = (
+            "dry_weight_g", "dry_weight_updated_at", "wet_weight_g",
+            "wet_weight_updated_at", "watering_loss_threshold_percent",
+            "watering_loss_threshold_updated_at",
+        )
+        return {key: getattr(row, key) if row is not None else None for key in keys}
+
+    def confirm_watering_settings(
+        self, name: str, config: dict[str, Any], changed_at: float
+    ) -> None:
+        with self.store.session() as session:
+            row = session.get(DeviceWateringSettingsRecord, name)
+            if row is None:
+                row = DeviceWateringSettingsRecord(device_name=name)
+                session.add(row)
+            timestamp_keys = {
+                "dry_weight_g": "dry_weight_updated_at",
+                "wet_weight_g": "wet_weight_updated_at",
+                "watering_loss_threshold_percent": "watering_loss_threshold_updated_at",
+            }
+            for key, timestamp_key in timestamp_keys.items():
+                value = config.get(key)
+                if isinstance(value, (int, float)):
+                    setattr(row, key, int(value))
+                    setattr(row, timestamp_key, changed_at)
 
 
 class PlantWateringEventStore:
@@ -663,7 +727,9 @@ class OperationLog:
             try:
                 payload = json.loads(payload_json or "{}")
                 if isinstance(payload, dict):
-                    DeviceRegistry(self.store).apply_confirmed_config(device_name, payload)
+                    registry = DeviceRegistry(self.store)
+                    confirmed_device = registry.apply_confirmed_config(device_name, payload)
+                    registry.confirm_watering_settings(confirmed_device.name, payload, now)
             except (json.JSONDecodeError, SmartWateringError) as exc:
                 self.log(
                     f"confirmed config apply skipped operation_id={operation_id} "

@@ -24,6 +24,7 @@ from smart_watering.domain import (
     OP_TIMEOUT,
     OperationLog,
     QueuedCommand,
+    RetryableDeviceApiError,
     SmartWateringError,
     build_callback_url,
     parse_positive_int,
@@ -301,7 +302,9 @@ class SmartWateringCliApp(SmartWateringService):
 
         devices = subparsers.add_parser("devices", help="Manage registered devices")
         device_subparsers = devices.add_subparsers(dest="device_command")
-        add = device_subparsers.add_parser("add", help="Register a device and push runtime config")
+        add = device_subparsers.add_parser(
+            "add", help="Discover and register a device; configure it only when offline and confirmed"
+        )
         add.add_argument("ip")
         add.add_argument("name", nargs="?")
         add.add_argument("--type", choices=sorted(DEVICE_TYPES), default=DeviceType.PLANT)
@@ -465,12 +468,62 @@ class SmartWateringCliApp(SmartWateringService):
         if not ip:
             print("cancelled")
             return
-        device_type = self.prompt_device_type(DeviceType.PLANT)
-        name = self.prompt("Device name", "")
-        device = self.registry.add(ip, device_type, name or None)
-        operation_id = self.queue_device_config(device, {"device_type": device.device_type, "name": device.name}, f"configure {device.name}")
-        print(f"registered: {device.name} ({device.device_type}) {device.ip}")
-        self.report_operation(operation_id)
+        self.register_device(ip)
+
+    @staticmethod
+    def discovered_identity(status: dict[str, Any]) -> tuple[str, str]:
+        device = status.get("device")
+        if not isinstance(device, dict):
+            raise SmartWateringError("invalid /watering response: missing device object")
+        name = device.get("name")
+        device_type = device.get("type")
+        if not isinstance(name, str) or not name:
+            raise SmartWateringError("invalid /watering response: missing device.name")
+        if device_type not in DEVICE_TYPES:
+            raise SmartWateringError("invalid /watering response: unsupported device.type")
+        return name, device_type
+
+    def register_device(
+        self,
+        ip_or_url: str,
+        fallback_type: str | None = None,
+        fallback_name: str | None = None,
+        wait: bool = True,
+    ) -> bool:
+        _, base_url = self.registry.normalize_base_url(ip_or_url)
+        try:
+            status = self.api.request_json(base_url, "/watering", "GET")
+        except RetryableDeviceApiError as exc:
+            print(f"warning: device is not powered on or is sleeping ({exc})")
+            print(
+                "warning: continuing will overwrite the controller's persisted fields: "
+                "device_type and name"
+            )
+            confirmation = input("Continue with the current add procedure? [y/N]: ").strip().lower()
+            if confirmation not in {"y", "yes"}:
+                print("cancelled")
+                return True
+
+            if fallback_type is None:
+                fallback_type = self.prompt_device_type(DeviceType.PLANT)
+                fallback_name = self.prompt("Device name", "") or None
+            device = self.registry.add(ip_or_url, fallback_type, fallback_name)
+            operation_id = self.queue_device_config(
+                device,
+                {"device_type": device.device_type, "name": device.name},
+                f"configure {device.name}",
+            )
+            print(f"registered: {device.name} ({device.device_type}) {device.ip}")
+            return self.report_operation(operation_id, wait=wait)
+
+        name, device_type = self.discovered_identity(status)
+        device = self.registry.upsert_discovered(ip_or_url, device_type, name)
+        print("device responded with:")
+        print(f"  name: {device.name}")
+        print(f"  device_type: {device.device_type}")
+        print(f"  address: {device.ip}")
+        print("registered without changing device config")
+        return True
 
     def interactive_remove_device(self) -> None:
         device = self.choose_device("Remove device")
@@ -729,10 +782,9 @@ class SmartWateringCliApp(SmartWateringService):
                 return self.run_interactive()
             if args.command == "devices":
                 if args.device_command == "add":
-                    device = self.registry.add(args.ip, args.type, args.name)
-                    operation_id = self.queue_device_config(device, {"device_type": device.device_type, "name": device.name}, f"configure {device.name}")
-                    print(f"registered: {device.name} ({device.device_type}) {device.ip}")
-                    return 0 if self.report_operation(operation_id, wait=not args.no_wait) else 1
+                    return 0 if self.register_device(
+                        args.ip, args.type, args.name, wait=not args.no_wait
+                    ) else 1
                 if args.device_command == "list":
                     print(self.format_devices(self.registry.list()))
                     return 0

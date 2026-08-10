@@ -29,6 +29,44 @@ def device_types(_session: SessionDep) -> dict[str, list[str]]:
     return {"types": sorted(DEVICE_TYPES)}
 
 
+@router.get("/devices/{device_name}/watering-parameters")
+def watering_parameters(device_name: str, api: RuntimeDep, _session: SessionDep) -> dict[str, Any]:
+    return {"device": device_name, **api.business.registry.watering_settings(device_name)}
+
+
+@router.put("/devices/{device_name}/watering-parameters")
+def update_watering_parameters(
+    device_name: str,
+    payload: dict[str, Any],
+    api: RuntimeDep,
+    _session: SessionDep,
+) -> dict[str, Any]:
+    allowed = {"dry_weight_g", "wet_weight_g", "watering_loss_threshold_percent"}
+    if not any(key in payload for key in allowed):
+        raise PublicApiError("at least one watering parameter is required", 400, "invalid_watering_parameters")
+    values: dict[str, int] = {}
+    for key in allowed:
+        if key not in payload:
+            continue
+        value = payload[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise PublicApiError(f"{key} must be a non-negative integer", 400, "invalid_watering_parameters")
+        values[key] = value
+    threshold = values.get("watering_loss_threshold_percent")
+    if threshold is not None and threshold > 100:
+        raise PublicApiError("watering_loss_threshold_percent must be <= 100", 400, "invalid_watering_parameters")
+
+    device = api.business.registry.get(device_name)
+    operation_id = api.business.queue_device_config(
+        device, values, f"configure {device_name} watering parameters"
+    )
+    return {
+        "device": device_name,
+        "operation_id": operation_id,
+        **api.business.registry.watering_settings(device_name),
+    }
+
+
 @router.get("/devices/{device_name}/water-consumption")
 def water_consumption(device_name: str, api: RuntimeDep, _session: SessionDep) -> dict[str, Any]:
     return api.service.water_consumption_response(device_name)
@@ -219,7 +257,10 @@ def configure(
     api: RuntimeDep,
     _session: SessionDep,
 ) -> dict[str, Any]:
-    allowed = {"device_type", "name", "dry_weight_g", "tare_weight_g"}
+    allowed = {
+        "device_type", "name", "dry_weight_g", "tare_weight_g",
+        "wet_weight_g", "watering_loss_threshold_percent",
+    }
     config = {key: value for key, value in payload.items() if key in allowed}
     if not config:
         raise PublicApiError("at least one config field is required", 400, "invalid_config")

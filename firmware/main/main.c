@@ -101,7 +101,6 @@ static void enter_deep_sleep(void)
     deactivate_gpio(HX711_SCK_PIN);
     deactivate_gpio(HX711_DOUT_PIN);
 
-    esp_sleep_pd_config(ESP_PD_DOMAIN_RC_FAST, ESP_PD_OPTION_OFF);
     ESP_LOGI(TAG, "entering deep sleep");
     esp_deep_sleep_start();
 }

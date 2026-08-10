@@ -47,6 +47,8 @@ typedef struct {
     float water_used_g;
     float tare_weight_g;
     float dry_weight_g;
+    float wet_weight_g;
+    float watering_loss_threshold_percent;
     float tare_tolerance_g;
     float gross_weight_g;
     bool led_on;
@@ -81,7 +83,11 @@ bool watering_set_runtime_config(
     float tare_weight_g,
     bool has_tare_weight_g,
     float dry_weight_g,
-    bool has_dry_weight_g
+    bool has_dry_weight_g,
+    float wet_weight_g,
+    bool has_wet_weight_g,
+    float watering_loss_threshold_percent,
+    bool has_watering_loss_threshold_percent
 );
 void watering_prepare_for_sleep(void);
 const char *watering_state_to_string(watering_state_t state);

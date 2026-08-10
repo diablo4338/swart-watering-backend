@@ -65,7 +65,10 @@ class PublicApiService:
         if isinstance(target_g, (int, float)):
             response["target_g"] = target_g
         if isinstance(payload, dict):
-            for key in ("minutes", "weight_g", "device_type", "name", "dry_weight_g", "tare_weight_g"):
+            for key in (
+                "minutes", "weight_g", "device_type", "name", "dry_weight_g",
+                "tare_weight_g", "wet_weight_g", "watering_loss_threshold_percent",
+            ):
                 if key in payload:
                     response[key] = payload[key]
         if operation.get("error") is not None:

@@ -181,6 +181,44 @@ paths:
                 $ref: "#/components/schemas/Operation"
         "400":
           $ref: "#/components/responses/Error"
+  /api/v2/devices/{device}/watering-parameters:
+    get:
+      summary: Return confirmed watering parameters and their individual update times
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      responses:
+        "200":
+          description: Confirmed watering parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WateringParameters"
+    put:
+      summary: Queue a partial watering parameters update
+      description: >-
+        Only supplied fields are changed. Values and per-field timestamps remain
+        unchanged until the device reports successful application of the command.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WateringParametersRequest"
+      responses:
+        "200":
+          description: Operation queued; the parameter values are still the last confirmed values
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WateringParameters"
+        "400":
+          $ref: "#/components/responses/Error"
   /api/v2/devices/{device}/sleep/enable:
     post:
       summary: Queue enabling controller sleep
@@ -674,8 +712,56 @@ components:
           type: string
         dry_weight_g:
           type: number
+        wet_weight_g:
+          type: number
+        watering_loss_threshold_percent:
+          type: number
         tare_weight_g:
           type: number
+    WateringParametersRequest:
+      type: object
+      minProperties: 1
+      properties:
+        dry_weight_g:
+          type: integer
+          minimum: 0
+        wet_weight_g:
+          type: integer
+          minimum: 0
+        watering_loss_threshold_percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+    WateringParameters:
+      type: object
+      required: [device]
+      properties:
+        device:
+          type: string
+        dry_weight_g:
+          type: integer
+          nullable: true
+        dry_weight_updated_at:
+          type: number
+          nullable: true
+          description: Time when the device confirmed this dry weight.
+        wet_weight_g:
+          type: integer
+          nullable: true
+        wet_weight_updated_at:
+          type: number
+          nullable: true
+          description: Time when the device confirmed this wet weight.
+        watering_loss_threshold_percent:
+          type: integer
+          nullable: true
+        watering_loss_threshold_updated_at:
+          type: number
+          nullable: true
+          description: Time when the device confirmed this threshold.
+        operation_id:
+          type: string
+          nullable: true
     SleepIntervalRequest:
       type: object
       required: [minutes]
@@ -862,6 +948,10 @@ components:
         name:
           type: string
         dry_weight_g:
+          type: number
+        wet_weight_g:
+          type: number
+        watering_loss_threshold_percent:
           type: number
         tare_weight_g:
           type: number

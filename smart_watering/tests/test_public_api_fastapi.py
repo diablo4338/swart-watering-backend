@@ -110,6 +110,74 @@ def test_fastapi_registers_documented_v2_routes() -> None:
         )
 
 
+def test_watering_parameters_are_confirmed_and_timestamped_per_field() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        client, cli = make_client(temp_dir)
+        cli.auth.add_user("client", "secret-password")
+        cli.registry.add("10.0.0.1", "plant", "plant_1")
+        token = client.post(
+            "/api/v2/auth/login",
+            json={"username": "client", "password": "secret-password"},
+        ).json()["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        endpoint = "/api/v2/devices/plant_1/watering-parameters"
+
+        initial = client.get(endpoint, headers=headers)
+        queued = client.put(
+            endpoint,
+            json={"dry_weight_g": 120, "wet_weight_g": 500},
+            headers=headers,
+        )
+
+        assert initial.status_code == 200
+        assert initial.json()["dry_weight_g"] is None
+        assert queued.status_code == 200
+        assert queued.json()["dry_weight_g"] is None
+        assert queued.json()["dry_weight_updated_at"] is None
+
+        cli.operations.event(queued.json()["operation_id"], "success", "config_updated")
+        confirmed = client.get(endpoint, headers=headers).json()
+        dry_updated_at = confirmed["dry_weight_updated_at"]
+        wet_updated_at = confirmed["wet_weight_updated_at"]
+
+        assert confirmed["dry_weight_g"] == 120
+        assert dry_updated_at is not None
+        assert confirmed["wet_weight_g"] == 500
+        assert wet_updated_at is not None
+
+        wet_only = client.put(endpoint, json={"wet_weight_g": 510}, headers=headers)
+        cli.operations.event(wet_only.json()["operation_id"], "success", "config_updated")
+        updated = client.get(endpoint, headers=headers).json()
+
+        assert updated["dry_weight_g"] == 120
+        assert updated["dry_weight_updated_at"] == dry_updated_at
+        assert updated["wet_weight_g"] == 510
+        assert updated["wet_weight_updated_at"] >= wet_updated_at
+
+
+def test_watering_parameters_reject_invalid_or_empty_updates() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        client, cli = make_client(temp_dir)
+        cli.auth.add_user("client", "secret-password")
+        cli.registry.add("10.0.0.1", "plant", "plant_1")
+        token = client.post(
+            "/api/v2/auth/login",
+            json={"username": "client", "password": "secret-password"},
+        ).json()["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        endpoint = "/api/v2/devices/plant_1/watering-parameters"
+
+        assert client.put(endpoint, json={}, headers=headers).status_code == 400
+        assert client.put(
+            endpoint, json={"dry_weight_g": 1.5}, headers=headers
+        ).status_code == 400
+        assert client.put(
+            endpoint,
+            json={"watering_loss_threshold_percent": 101},
+            headers=headers,
+        ).status_code == 400
+
+
 def test_detected_watering_history_soft_delete() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         client, cli = make_client(temp_dir)

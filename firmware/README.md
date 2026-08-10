@@ -107,7 +107,8 @@ Returns compact JSON:
 
 ### `POST /config`
 
-Updates config. `device_type`, `name`, `dry_weight_g` and `tare_weight_g` are persisted in `NVS`.
+Updates config. `device_type`, `name`, `dry_weight_g`, `wet_weight_g`,
+`watering_loss_threshold_percent` and `tare_weight_g` are persisted in `NVS`.
 Fields can be sent partially. Every supplied field is validated first, then the resulting config is saved in one `NVS` commit.
 
 ```json

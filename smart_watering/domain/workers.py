@@ -97,6 +97,8 @@ class DeviceApiClient:
             raise DeviceHttpError(exc.code, path, body) from exc
         except urllib.error.URLError as exc:
             raise RetryableDeviceApiError(f"request failed for {path}: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise RetryableDeviceApiError(f"request timed out for {path}") from exc
         except UnicodeError as exc:
             raise SmartWateringError(f"invalid URL for {path}: {base_url}") from exc
 

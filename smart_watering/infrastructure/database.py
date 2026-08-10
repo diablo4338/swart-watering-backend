@@ -35,6 +35,20 @@ class DeviceRecord(Base):
     updated_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class DeviceWateringSettingsRecord(Base):
+    __tablename__ = "device_watering_settings"
+
+    device_name: Mapped[str] = mapped_column(
+        String, ForeignKey("devices.name", ondelete="CASCADE"), primary_key=True,
+    )
+    dry_weight_g: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    dry_weight_updated_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    wet_weight_g: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    wet_weight_updated_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    watering_loss_threshold_percent: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    watering_loss_threshold_updated_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
 class OperationRecord(Base):
     __tablename__ = "operations"
 

@@ -570,6 +570,48 @@ def test_device_name_is_database_primary_key() -> None:
         assert name_column[5] == 1
 
 
+def test_watering_setting_dates_are_updated_per_field_after_confirmed_changes() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        device = app.registry.add("192.168.1.10", "plant", "plant_1")
+
+        operation_id = app.queue_device_config(
+            device,
+            {
+                "dry_weight_g": 120,
+                "wet_weight_g": 500,
+                "watering_loss_threshold_percent": 35,
+            },
+            "configure watering parameters",
+        )
+        app.operations.event(operation_id, "accepted", "device accepted command")
+        assert all(value is None for value in app.registry.watering_settings("plant_1").values())
+
+        app.operations.event(operation_id, "success", "config_updated")
+        confirmed = app.registry.watering_settings("plant_1")
+
+        assert confirmed["dry_weight_g"] == 120
+        assert confirmed["dry_weight_updated_at"] is not None
+        assert confirmed["wet_weight_g"] == 500
+        assert confirmed["wet_weight_updated_at"] is not None
+        assert confirmed["watering_loss_threshold_percent"] == 35
+        assert confirmed["watering_loss_threshold_updated_at"] is not None
+
+        dry_updated_at = confirmed["dry_weight_updated_at"]
+        wet_updated_at = confirmed["wet_weight_updated_at"]
+        wet_operation_id = app.queue_device_config(
+            device, {"wet_weight_g": 510}, "update wet weight"
+        )
+        app.operations.event(wet_operation_id, "success", "config_updated")
+        partially_updated = app.registry.watering_settings("plant_1")
+
+        assert partially_updated["dry_weight_g"] == 120
+        assert partially_updated["dry_weight_updated_at"] == dry_updated_at
+        assert partially_updated["wet_weight_g"] == 510
+        assert partially_updated["wet_weight_updated_at"] >= wet_updated_at
+        assert partially_updated["watering_loss_threshold_percent"] == 35
+
+
 def test_registry_assigns_default_plant_names() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         registry = smart_core.DeviceRegistry(make_store(temp_dir))
@@ -1641,15 +1683,83 @@ def test_cli_pings_device(capsys) -> None:
         assert "plant_1: online" in output.out
 
 
-def test_cli_reports_duplicate_device_name(capsys) -> None:
+def test_cli_add_discovers_device_without_writing_config(capsys) -> None:
+    class OnlineApi:
+        def request_json(self, base_url, path, method, payload=None):
+            assert (base_url, path, method) == ("http://192.168.1.10", "/watering", "GET")
+            return {"device": {"type": "tank", "name": "remote_tank"}}
+
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.api = OnlineApi()
 
-        assert app.run(["devices", "add", "192.168.1.10", "plant_1", "--no-wait"]) == 0
-        assert app.run(["devices", "add", "192.168.1.11", "plant_1"]) == 1
+        assert app.run(["devices", "add", "192.168.1.10", "local_name", "--type", "plant"]) == 0
 
         output = capsys.readouterr()
-        assert "device name already exists: plant_1" in output.err
+        assert "name: remote_tank" in output.out
+        assert "device_type: tank" in output.out
+        assert "address: 192.168.1.10" in output.out
+        assert "registered without changing device config" in output.out
+        assert app.registry.get("remote_tank").device_type == "tank"
+        assert app.queue.list() == []
+
+
+def test_interactive_add_does_not_prompt_for_config_when_device_responds(monkeypatch, capsys) -> None:
+    class OnlineApi:
+        def request_json(self, base_url, path, method, payload=None):
+            return {"device": {"type": "plant", "name": "balcony"}}
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.api = OnlineApi()
+        answers = iter(["192.168.1.12"])
+        monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+        app.interactive_register_device()
+
+        assert app.registry.get("balcony").ip == "192.168.1.12"
+        assert app.queue.list() == []
+        assert "registered without changing device config" in capsys.readouterr().out
+
+
+def test_cli_add_offline_device_requires_confirmation(monkeypatch, capsys) -> None:
+    class OfflineApi:
+        def request_json(self, base_url, path, method, payload=None):
+            raise smart_core.RetryableDeviceApiError("device sleeping")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.api = OfflineApi()
+        monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+
+        assert app.run(["devices", "add", "192.168.1.10", "plant_1"]) == 0
+
+        output = capsys.readouterr().out
+        assert "device is not powered on or is sleeping" in output
+        assert "device_type and name" in output
+        assert "cancelled" in output
+        assert app.registry.list() == []
+        assert app.queue.list() == []
+
+
+def test_cli_add_offline_device_continues_after_confirmation(monkeypatch, capsys) -> None:
+    class OfflineApi:
+        def request_json(self, base_url, path, method, payload=None):
+            raise smart_core.RetryableDeviceApiError("device sleeping")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.api = OfflineApi()
+        monkeypatch.setattr("builtins.input", lambda _prompt: "yes")
+
+        assert app.run(["devices", "add", "192.168.1.10", "plant_1", "--no-wait"]) == 0
+
+        commands = app.queue.list()
+        assert len(commands) == 1
+        assert commands[0].path == "/config"
+        assert commands[0].payload["device_type"] == "plant"
+        assert commands[0].payload["name"] == "plant_1"
+        assert "registered: plant_1 (plant) 192.168.1.10" in capsys.readouterr().out
 
 
 def test_interactive_device_action_reports_missing_devices(monkeypatch, capsys) -> None:
