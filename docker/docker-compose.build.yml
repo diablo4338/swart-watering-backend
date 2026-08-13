@@ -1,20 +1,32 @@
 services:
   smart-watering:
     build:
+      platforms:
+        - linux/amd64
+        - linux/arm64
       context: ..
       dockerfile: docker/Dockerfile.node
 
   worker:
     build:
+      platforms:
+        - linux/amd64
+        - linux/arm64
       context: ..
       dockerfile: docker/Dockerfile.worker
 
   public-api:
     build:
+      platforms:
+        - linux/amd64
+        - linux/arm64
       context: ..
       dockerfile: docker/Dockerfile.public-api
 
   cli:
     build:
+      platforms:
+        - linux/amd64
+        - linux/arm64
       context: ..
       dockerfile: docker/Dockerfile.cli

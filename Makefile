@@ -24,8 +24,7 @@ restart:
 
 publish:
 	$(PUBLISH_COMPOSE) config --quiet
-	$(PUBLISH_COMPOSE) build $(PUBLISH_SERVICES)
-	$(PUBLISH_COMPOSE) push $(PUBLISH_SERVICES)
+	$(PUBLISH_COMPOSE) build --push $(PUBLISH_SERVICES)
 
 cli:
 	$(COMPOSE) exec cli python -m smart_watering $(CLI_ARGS)
