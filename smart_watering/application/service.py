@@ -1,5 +1,6 @@
 from smart_watering.domain import (
     CONFIG_FLOAT_KEYS,
+    DISCOVERY_DEVICE_PREFIX,
     OP_CANCELLED,
     OP_SUCCESS,
     REQUEST_TIMEOUT_SEC,
@@ -34,6 +35,44 @@ class SmartWateringService:
 
     def callback_url(self) -> str:
         return build_callback_url()
+
+    def queue_device_discovery(self, ip_or_url: str) -> str:
+        _ip, base_url = self.registry.normalize_base_url(ip_or_url)
+        pending_id = self.queue.find_duplicate(base_url, "/watering", "GET", None)
+        if pending_id is not None:
+            return pending_id
+        placeholder = f"{DISCOVERY_DEVICE_PREFIX}{base_url}"
+        operation_id = self.operations.create(
+            placeholder, "device_discovery", {"base_url": base_url}
+        )
+        return self.queue.enqueue(
+            operation_id,
+            placeholder,
+            base_url,
+            "/watering",
+            "GET",
+            None,
+            f"discover device at {base_url}",
+        )
+
+    def cancel_device_discovery(self, ip_or_url: str) -> list[str]:
+        _ip, base_url = self.registry.normalize_base_url(ip_or_url)
+        operation_ids: list[str] = []
+        for command in self.queue.list():
+            if (
+                command.base_url == base_url
+                and command.device_name.startswith(DISCOVERY_DEVICE_PREFIX)
+                and command.method == "GET"
+                and command.path == "/watering"
+            ):
+                self.operations.event(
+                    command.operation_id,
+                    OP_CANCELLED,
+                    "superseded by explicit device configuration",
+                )
+                self.queue.pop(command.id)
+                operation_ids.append(command.operation_id)
+        return operation_ids
 
     def build_operation_payload(self, operation_id: str, payload: dict | None = None) -> dict:
         return {**(payload or {}), "operation_id": operation_id, "callback_url": self.callback_url()}

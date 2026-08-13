@@ -119,6 +119,19 @@ class UserSessionRecord(Base):
     revoked_at: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+class IdempotencyRecord(Base):
+    __tablename__ = "idempotency_records"
+
+    scope_key: Mapped[str] = mapped_column(String, primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String, primary_key=True)
+    request_hash: Mapped[str] = mapped_column(String, nullable=False)
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    response_body: Mapped[str | None] = mapped_column(String, nullable=True)
+    content_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
 class PlantWateringEventRecord(Base):
     __tablename__ = "plant_watering_events"
     __table_args__ = (

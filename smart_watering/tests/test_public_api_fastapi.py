@@ -110,6 +110,61 @@ def test_fastapi_registers_documented_v2_routes() -> None:
         )
 
 
+def test_mutating_request_with_idempotency_key_replays_original_response() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        client, cli = make_client(temp_dir)
+        cli.auth.add_user("client", "secret-password")
+        cli.registry.add("10.0.0.1", "plant", "plant_1")
+        token = client.post(
+            "/api/v2/auth/login",
+            json={"username": "client", "password": "secret-password"},
+        ).json()["token"]
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Idempotency-Key": "018f927c-5c9a-7c14-a8e0-88d00bca0177",
+        }
+        cli.queue_device_status("plant_1")
+
+        first = client.post(
+            "/api/v2/devices/plant_1/queue/clear", json={}, headers=headers
+        )
+        replay = client.post(
+            "/api/v2/devices/plant_1/queue/clear", json={}, headers=headers
+        )
+
+        assert first.status_code == 200
+        assert first.json() == {"cleared": 1}
+        assert replay.status_code == 200
+        assert replay.json() == first.json()
+        assert replay.headers["Idempotency-Replayed"] == "true"
+
+
+def test_idempotency_key_cannot_be_reused_for_another_request() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        client, cli = make_client(temp_dir)
+        cli.auth.add_user("client", "secret-password")
+        cli.registry.add("10.0.0.1", "plant", "plant_1")
+        token = client.post(
+            "/api/v2/auth/login",
+            json={"username": "client", "password": "secret-password"},
+        ).json()["token"]
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Idempotency-Key": "018f927c-5c9a-7c14-a8e0-88d00bca0178",
+        }
+
+        first = client.post(
+            "/api/v2/devices/plant_1/queue/clear", json={}, headers=headers
+        )
+        conflict = client.post(
+            "/api/v2/devices/plant_1/status", json={}, headers=headers
+        )
+
+        assert first.status_code == 200
+        assert conflict.status_code == 409
+        assert conflict.json()["error"] == "idempotency_key_conflict"
+
+
 def test_watering_parameters_are_confirmed_and_timestamped_per_field() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         client, cli = make_client(temp_dir)

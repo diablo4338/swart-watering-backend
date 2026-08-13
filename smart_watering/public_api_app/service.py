@@ -144,7 +144,13 @@ class PublicApiService:
             "config": {
                 "target_g": number_or_none(config.get("target_g")),
                 "dry_weight_g": number_or_none(config.get("dry_weight_g")),
+                "wet_weight_g": number_or_none(config.get("wet_weight_g")),
+                "watering_loss_threshold_percent": number_or_none(
+                    config.get("watering_loss_threshold_percent")
+                ),
                 "tare_weight_g": number_or_none(config.get("tare_weight_g")),
+                "zero_raw": number_or_none(config.get("zero_raw")),
+                "raw_per_gram": number_or_none(config.get("raw_per_gram")),
                 "sleep_disabled": config.get("sleep_disabled"),
                 "sleep_interval_min": config.get("sleep_interval_min"),
             },

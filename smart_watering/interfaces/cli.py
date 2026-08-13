@@ -15,6 +15,7 @@ from smart_watering.domain import (
     CONFIG_KEYS,
     DEVICE_TYPES,
     DeviceType,
+    discovered_device_config,
     RETRYABLE_COMMANDS,
     Device,
     OP_CANCELLED,
@@ -308,6 +309,12 @@ class SmartWateringCliApp(SmartWateringService):
         add.add_argument("ip")
         add.add_argument("name", nargs="?")
         add.add_argument("--type", choices=sorted(DEVICE_TYPES), default=DeviceType.PLANT)
+        add.add_argument(
+            "--when-offline",
+            choices=("ask", "cancel", "configure", "defer"),
+            default="ask",
+            help="Action when the device is sleeping: cancel, configure it, or defer discovery to the worker",
+        )
         add_wait_argument(add)
         device_subparsers.add_parser("list", help="List registered devices")
         remove = device_subparsers.add_parser("remove", help="Remove a registered device")
@@ -472,16 +479,13 @@ class SmartWateringCliApp(SmartWateringService):
 
     @staticmethod
     def discovered_identity(status: dict[str, Any]) -> tuple[str, str]:
-        device = status.get("device")
-        if not isinstance(device, dict):
-            raise SmartWateringError("invalid /watering response: missing device object")
-        name = device.get("name")
-        device_type = device.get("type")
-        if not isinstance(name, str) or not name:
-            raise SmartWateringError("invalid /watering response: missing device.name")
-        if device_type not in DEVICE_TYPES:
-            raise SmartWateringError("invalid /watering response: unsupported device.type")
+        name, device_type, _settings = discovered_device_config(status)
         return name, device_type
+
+    @staticmethod
+    def discovered_watering_settings(status: dict[str, Any]) -> dict[str, int]:
+        _name, _device_type, settings = discovered_device_config(status)
+        return settings
 
     def register_device(
         self,
@@ -489,21 +493,39 @@ class SmartWateringCliApp(SmartWateringService):
         fallback_type: str | None = None,
         fallback_name: str | None = None,
         wait: bool = True,
+        when_offline: str = "ask",
     ) -> bool:
         _, base_url = self.registry.normalize_base_url(ip_or_url)
         try:
             status = self.api.request_json(base_url, "/watering", "GET")
         except RetryableDeviceApiError as exc:
             print(f"warning: device is not powered on or is sleeping ({exc})")
-            print(
-                "warning: continuing will overwrite the controller's persisted fields: "
-                "device_type and name"
-            )
-            confirmation = input("Continue with the current add procedure? [y/N]: ").strip().lower()
-            if confirmation not in {"y", "yes"}:
+            action = when_offline
+            if action == "ask":
+                print("1. Cancel")
+                print("2. Configure now (overwrites device_type and name when it wakes)")
+                print("3. Let the worker discover and register the device when it wakes")
+                choice = input("Choose [1-3, default 1]: ").strip().lower()
+                action = {
+                    "2": "configure", "y": "configure", "yes": "configure",
+                    "3": "defer",
+                }.get(choice, "cancel")
+            if action == "cancel":
                 print("cancelled")
                 return True
 
+            if action == "defer":
+                operation_id = self.queue_device_discovery(ip_or_url)
+                print(f"queued discovery: operation_id={operation_id} address={base_url}")
+                print("the worker will register the device with its persisted config when it wakes")
+                return True
+
+            cancelled_discoveries = self.cancel_device_discovery(ip_or_url)
+            if cancelled_discoveries:
+                print(
+                    "cancelled pending discovery before configuring device: "
+                    + ", ".join(cancelled_discoveries)
+                )
             if fallback_type is None:
                 fallback_type = self.prompt_device_type(DeviceType.PLANT)
                 fallback_name = self.prompt("Device name", "") or None
@@ -518,10 +540,17 @@ class SmartWateringCliApp(SmartWateringService):
 
         name, device_type = self.discovered_identity(status)
         device = self.registry.upsert_discovered(ip_or_url, device_type, name)
+        watering_settings = self.discovered_watering_settings(status)
+        if watering_settings:
+            self.registry.confirm_watering_settings(device.name, watering_settings, time.time())
         print("device responded with:")
         print(f"  name: {device.name}")
         print(f"  device_type: {device.device_type}")
         print(f"  address: {device.ip}")
+        if watering_settings:
+            print("  imported watering settings: " + ", ".join(
+                f"{key}={value}" for key, value in watering_settings.items()
+            ))
         print("registered without changing device config")
         return True
 
@@ -783,7 +812,11 @@ class SmartWateringCliApp(SmartWateringService):
             if args.command == "devices":
                 if args.device_command == "add":
                     return 0 if self.register_device(
-                        args.ip, args.type, args.name, wait=not args.no_wait
+                        args.ip,
+                        args.type,
+                        args.name,
+                        wait=not args.no_wait,
+                        when_offline=args.when_offline,
                     ) else 1
                 if args.device_command == "list":
                     print(self.format_devices(self.registry.list()))

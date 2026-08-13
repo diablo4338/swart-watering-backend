@@ -1687,7 +1687,14 @@ def test_cli_add_discovers_device_without_writing_config(capsys) -> None:
     class OnlineApi:
         def request_json(self, base_url, path, method, payload=None):
             assert (base_url, path, method) == ("http://192.168.1.10", "/watering", "GET")
-            return {"device": {"type": "tank", "name": "remote_tank"}}
+            return {
+                "device": {"type": "tank", "name": "remote_tank"},
+                "config": {
+                    "dry_weight_g": 120,
+                    "wet_weight_g": 510,
+                    "watering_loss_threshold_percent": 35,
+                },
+            }
 
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
@@ -1701,6 +1708,14 @@ def test_cli_add_discovers_device_without_writing_config(capsys) -> None:
         assert "address: 192.168.1.10" in output.out
         assert "registered without changing device config" in output.out
         assert app.registry.get("remote_tank").device_type == "tank"
+        settings = app.registry.watering_settings("remote_tank")
+        assert settings["dry_weight_g"] == 120
+        assert settings["wet_weight_g"] == 510
+        assert settings["watering_loss_threshold_percent"] == 35
+        assert settings["dry_weight_updated_at"] is not None
+        assert settings["wet_weight_updated_at"] is not None
+        assert settings["watering_loss_threshold_updated_at"] is not None
+        assert "imported watering settings" in output.out
         assert app.queue.list() == []
 
 
@@ -1760,6 +1775,102 @@ def test_cli_add_offline_device_continues_after_confirmation(monkeypatch, capsys
         assert commands[0].payload["device_type"] == "plant"
         assert commands[0].payload["name"] == "plant_1"
         assert "registered: plant_1 (plant) 192.168.1.10" in capsys.readouterr().out
+
+
+def test_cli_can_defer_offline_device_discovery_to_worker(capsys) -> None:
+    class SleepingThenOnlineApi:
+        def __init__(self) -> None:
+            self.requests = 0
+
+        def request_json(self, base_url, path, method, payload=None):
+            self.requests += 1
+            if self.requests <= 2:
+                raise smart_core.RetryableDeviceApiError("device sleeping")
+            return {
+                "device": {"type": "plant", "name": "sleepy_plant"},
+                "config": {
+                    "dry_weight_g": 140,
+                    "wet_weight_g": 520,
+                    "watering_loss_threshold_percent": 30,
+                },
+            }
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.api = SleepingThenOnlineApi()
+
+        assert app.run([
+            "devices", "add", "192.168.1.14", "--when-offline", "defer"
+        ]) == 0
+        assert app.registry.list() == []
+        assert len(app.queue.list()) == 1
+
+        worker = smart_core.BackgroundWorker(
+            app.api,
+            app.queue,
+            app.operations,
+            smart_core.WorkerState(str(Path(temp_dir) / "worker.pid")),
+            retry_interval_sec=0,
+            max_wait_sec=1,
+        )
+        worker.run()
+
+        device = app.registry.get("sleepy_plant")
+        settings = app.registry.watering_settings(device.name)
+        assert device.ip == "192.168.1.14"
+        assert settings["dry_weight_g"] == 140
+        assert settings["wet_weight_g"] == 520
+        assert settings["watering_loss_threshold_percent"] == 30
+        assert app.queue.list() == []
+        assert "queued discovery" in capsys.readouterr().out
+
+
+def test_deferred_discovery_uses_normal_worker_timeout() -> None:
+    class SleepingApi:
+        def request_json(self, base_url, path, method, payload=None):
+            raise smart_core.RetryableDeviceApiError("device sleeping")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.api = SleepingApi()
+        operation_id = app.queue_device_discovery("192.168.1.15")
+        worker = smart_core.BackgroundWorker(
+            app.api,
+            app.queue,
+            app.operations,
+            smart_core.WorkerState(str(Path(temp_dir) / "worker.pid")),
+            retry_interval_sec=0,
+            max_wait_sec=0,
+        )
+
+        worker.run()
+
+        assert app.operations.detail(operation_id)["status"] == "timeout"
+        assert app.queue.list() == []
+        assert app.registry.list() == []
+
+
+def test_explicit_offline_configuration_supersedes_pending_discovery(capsys) -> None:
+    class SleepingApi:
+        def request_json(self, base_url, path, method, payload=None):
+            raise smart_core.RetryableDeviceApiError("device sleeping")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.api = SleepingApi()
+        discovery_id = app.queue_device_discovery("192.168.1.16")
+
+        assert app.run([
+            "devices", "add", "192.168.1.16", "replacement", "--type", "plant",
+            "--when-offline", "configure", "--no-wait",
+        ]) == 0
+
+        commands = app.queue.list()
+        assert len(commands) == 1
+        assert commands[0].path == "/config"
+        assert commands[0].device_name == "replacement"
+        assert app.operations.detail(discovery_id)["status"] == "cancelled"
+        assert "cancelled pending discovery" in capsys.readouterr().out
 
 
 def test_interactive_device_action_reports_missing_devices(monkeypatch, capsys) -> None:
@@ -2778,7 +2889,11 @@ def test_public_api_status_latest_returns_minimal_snapshot_result() -> None:
             "config": {
                 "target_g": None,
                 "dry_weight_g": 120.0,
+                "wet_weight_g": None,
+                "watering_loss_threshold_percent": None,
                 "tare_weight_g": None,
+                "zero_raw": None,
+                "raw_per_gram": None,
                 "sleep_disabled": None,
                 "sleep_interval_min": 20,
             },
@@ -2869,7 +2984,11 @@ def test_public_api_status_latest_returns_snapshot_without_live_request() -> Non
         assert body["result"]["config"] == {
             "target_g": None,
             "dry_weight_g": None,
+            "wet_weight_g": None,
+            "watering_loss_threshold_percent": None,
             "tare_weight_g": None,
+            "zero_raw": None,
+            "raw_per_gram": None,
             "sleep_disabled": None,
             "sleep_interval_min": 20,
         }
@@ -3164,7 +3283,11 @@ def test_public_api_watering_status_includes_planned_watering() -> None:
         assert body["result"]["config"] == {
             "target_g": 0.0,
             "dry_weight_g": None,
+            "wet_weight_g": None,
+            "watering_loss_threshold_percent": None,
             "tare_weight_g": 450.0,
+            "zero_raw": None,
+            "raw_per_gram": None,
             "sleep_disabled": None,
             "sleep_interval_min": None,
         }

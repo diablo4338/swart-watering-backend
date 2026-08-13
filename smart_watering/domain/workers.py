@@ -10,6 +10,7 @@ from typing import Any
 
 from .foundation import (
     DEFAULT_NODE_PORT,
+    DISCOVERY_DEVICE_PREFIX,
     NODE_URL_ENV,
     NODE_WORKER_IDLE_INTERVAL_SEC,
     OP_ACCEPTED,
@@ -23,8 +24,9 @@ from .foundation import (
     QueuedCommand,
     RetryableDeviceApiError,
     SmartWateringError,
+    discovered_device_config,
 )
-from .repositories import CommandQueue, OperationLog
+from .repositories import CommandQueue, DeviceRegistry, OperationLog
 
 class WorkerState:
     def __init__(self, pid_path: str = WORKER_PID_PATH) -> None:
@@ -176,7 +178,30 @@ class BackgroundWorker:
 
     @staticmethod
     def _should_retry(command: QueuedCommand) -> bool:
-        return (command.method, command.path) in RETRYABLE_COMMANDS
+        return (
+            command.device_name.startswith(DISCOVERY_DEVICE_PREFIX)
+            or (command.method, command.path) in RETRYABLE_COMMANDS
+        )
+
+    @staticmethod
+    def _is_discovery(command: QueuedCommand) -> bool:
+        return (
+            command.device_name.startswith(DISCOVERY_DEVICE_PREFIX)
+            and command.method == "GET"
+            and command.path == "/watering"
+        )
+
+    def _complete_discovery(self, command: QueuedCommand, response: dict[str, Any]) -> str:
+        name, device_type, settings = discovered_device_config(response)
+        registry = DeviceRegistry(self.queue.store)
+        device = registry.upsert_discovered(command.base_url, device_type, name)
+        if settings:
+            registry.confirm_watering_settings(device.name, settings, time.time())
+        self.operations.update_payload(
+            command.operation_id,
+            {"base_url": command.base_url, "discovered_name": name, **settings},
+        )
+        return name
 
     def run(self) -> int:
         self.state.save_pid(os.getpid())
@@ -235,6 +260,24 @@ class BackgroundWorker:
 
             try:
                 response = self.api.request_json(command.base_url, command.path, command.method, command.payload)
+                if self._is_discovery(command):
+                    if self.operations.is_cancelled(command.operation_id):
+                        self.queue.pop(command.id)
+                        active_command_id = None
+                        active_started_at = 0.0
+                        continue
+                    discovered_name = self._complete_discovery(command, response)
+                    self.operations.update_result(command.operation_id, response)
+                    self.operations.event(command.operation_id, OP_SUCCESS, f"device discovered: {discovered_name}")
+                    self.queue.pop(command.id)
+                    self.log(
+                        f"discovered id={command.id} operation_id={command.operation_id} "
+                        f"name={discovered_name}",
+                        command.device_name,
+                    )
+                    active_command_id = None
+                    active_started_at = 0.0
+                    continue
                 if command.method == "GET" and command.path == "/watering":
                     self.operations.update_result(command.operation_id, response)
                     self.operations.event(command.operation_id, OP_SUCCESS, "status fetched")

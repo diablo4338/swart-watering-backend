@@ -8,6 +8,7 @@ from starlette.exceptions import HTTPException
 from smart_watering.domain import SmartWateringError
 
 from .errors import PublicApiError
+from .idempotency import IdempotencyMiddleware
 from .routers import app_releases, auth, devices, operations
 from .runtime import ApiRuntime
 
@@ -75,4 +76,5 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
     app.include_router(app_releases.router)
     app.include_router(devices.router)
     app.include_router(operations.router)
+    app.add_middleware(IdempotencyMiddleware, store=runtime.business.store)
     return app

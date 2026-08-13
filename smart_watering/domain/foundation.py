@@ -35,6 +35,31 @@ RETRYABLE_COMMANDS = frozenset({
     ("POST", "/sleep/disable"),
     ("POST", "/sleep/interval"),
 })
+DISCOVERY_DEVICE_PREFIX = "discovery:"
+
+
+def discovered_device_config(status: dict[str, Any]) -> tuple[str, str, dict[str, int]]:
+    device = status.get("device")
+    if not isinstance(device, dict):
+        raise SmartWateringError("invalid /watering response: missing device object")
+    name = device.get("name")
+    device_type = device.get("type")
+    if not isinstance(name, str) or not name:
+        raise SmartWateringError("invalid /watering response: missing device.name")
+    if device_type not in DEVICE_TYPES:
+        raise SmartWateringError("invalid /watering response: unsupported device.type")
+
+    settings: dict[str, int] = {}
+    config = status.get("config")
+    if isinstance(config, dict):
+        for key in ("dry_weight_g", "wet_weight_g", "watering_loss_threshold_percent"):
+            value = config.get(key)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+                continue
+            if key == "watering_loss_threshold_percent" and value > 100:
+                continue
+            settings[key] = int(value)
+    return name, device_type, settings
 
 class DeviceType(StrEnum):
     PLANT = "plant"
