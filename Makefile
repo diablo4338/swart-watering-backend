@@ -4,13 +4,14 @@ PRODUCTION_COMPOSE_FILE ?= docker/docker-compose.yml
 BUILD_COMPOSE_FILE ?= docker/docker-compose.build.yml
 SERVICES ?= smart-watering worker snapshotter watering-detector public-api cli
 PUBLISH_SERVICES ?= smart-watering worker public-api cli
+BINFMT_IMAGE ?= tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
 CLI_ARGS ?=
 
 COMPOSE = docker compose --env-file $(ENV_FILE) -f $(COMPOSE_FILE)
 PUBLISH_COMPOSE = docker compose --env-file $(ENV_FILE) \
 	-f $(PRODUCTION_COMPOSE_FILE) -f $(BUILD_COMPOSE_FILE)
 
-.PHONY: build restart publish cli
+.PHONY: build restart prepare-multiarch publish cli
 
 build:
 	$(COMPOSE) config --quiet
@@ -22,7 +23,10 @@ restart:
 	$(COMPOSE) build $(SERVICES)
 	$(COMPOSE) up --force-recreate -d $(SERVICES)
 
-publish:
+prepare-multiarch:
+	docker run --privileged --rm $(BINFMT_IMAGE) --install arm64,amd64
+
+publish: prepare-multiarch
 	$(PUBLISH_COMPOSE) config --quiet
 	$(PUBLISH_COMPOSE) build --push $(PUBLISH_SERVICES)
 
