@@ -232,6 +232,10 @@ period. A positive value means that the plant weight increased. Completed period
 hours; an active period uses the actual time from its start through now.
 Prometheus defaults to `http://127.0.0.1:9090` and can be overridden with
 `SMART_WATERING_PROMETHEUS_URL`.
+If Prometheus is unavailable or returns an invalid response, this endpoint returns
+`424 Failed Dependency` with a machine-readable error code such as
+`prometheus_unavailable`. This confirms that the public API itself is reachable while
+the optional statistics dependency is not.
 The latest completed day or night period is compared with the median of earlier completed
 periods of the same type. The calculation window is controlled by
 `SMART_WATERING_CONSUMPTION_MEDIAN_DAYS` (default: `5`). Its

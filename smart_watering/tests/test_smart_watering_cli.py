@@ -81,6 +81,26 @@ def test_prometheus_instance_adds_default_http_port() -> None:
     assert statistics.prometheus_instance("http://192.0.2.100:8080") == "192.0.2.100:8080"
 
 
+def test_prometheus_unavailable_is_failed_dependency(monkeypatch) -> None:
+    def unavailable(*_args, **_kwargs):
+        raise OSError("connection timed out")
+
+    monkeypatch.setattr(statistics.urllib.request, "urlopen", unavailable)
+    client = statistics.PrometheusClient("http://prometheus.invalid")
+
+    try:
+        client.range_samples(
+            "gross_weight_g",
+            datetime(2026, 8, 15, tzinfo=timezone.utc),
+            datetime(2026, 8, 15, 1, tzinfo=timezone.utc),
+        )
+    except PublicApiError as error:
+        assert error.status_code == 424
+        assert error.code == "prometheus_unavailable"
+    else:
+        raise AssertionError("unavailable Prometheus did not raise PublicApiError")
+
+
 def test_water_consumption_query_end_uses_now_for_active_period() -> None:
     tz = timezone(timedelta(hours=2))
     start = datetime(2026, 7, 26, 8, 0, tzinfo=tz)

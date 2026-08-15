@@ -350,7 +350,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WaterConsumptionResponse"
-        "502":
+        "424":
           $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"

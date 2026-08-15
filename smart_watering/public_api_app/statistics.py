@@ -194,10 +194,10 @@ class PrometheusClient:
                 payload = json.loads(response.read().decode("utf-8"))
         except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as exc:
             raise PublicApiError(
-                f"Prometheus request failed: {exc}", 502, "prometheus_unavailable"
+                f"Prometheus request failed: {exc}", 424, "prometheus_unavailable"
             ) from exc
         if payload.get("status") != "success":
-            raise PublicApiError("Prometheus range query failed", 502, "prometheus_query_failed")
+            raise PublicApiError("Prometheus range query failed", 424, "prometheus_query_failed")
         results = payload.get("data", {}).get("result", [])
         if not results:
             return []
@@ -208,5 +208,5 @@ class PrometheusClient:
             ]
         except (IndexError, TypeError, ValueError) as exc:
             raise PublicApiError(
-                "invalid Prometheus response", 502, "invalid_prometheus_response"
+                "invalid Prometheus response", 424, "invalid_prometheus_response"
             ) from exc
