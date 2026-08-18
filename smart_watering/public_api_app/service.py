@@ -201,6 +201,11 @@ class PublicApiService:
             if previous_timeout is not None:
                 self.app.api.timeout_sec = LATEST_STATUS_LIVE_TIMEOUT_SEC
             result = self.app.api.request_json(device.base_url, "/watering", "GET")
+            config = result.get("config") if isinstance(result, dict) else None
+            if isinstance(config, dict):
+                self.app.registry.confirm_watering_settings(
+                    device.name, config, time.time()
+                )
             return self.available_status_response(
                 device_name=device.name,
                 source=DeviceStatusSource.LIVE,

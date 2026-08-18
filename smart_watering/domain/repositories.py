@@ -5,6 +5,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from smart_watering.infrastructure.database import (
@@ -25,6 +26,7 @@ from .foundation import (
     OP_TIMEOUT,
     PASSWORD_HASH_ITERATIONS,
     Device,
+    DeviceNameConflictError,
     DeviceType,
     QueuedCommand,
     SQLiteStore,
@@ -81,11 +83,11 @@ class DeviceRegistry:
         device_name = name or self.next_name(device_type)
 
         with self.store.session() as session:
-            existing = session.get(DeviceRecord, device_name)
+            existing = session.scalar(select(DeviceRecord).where(DeviceRecord.name == device_name))
             if existing is not None and device_type == DeviceType.TANK:
-                return Device(existing.name, existing.ip, existing.base_url, device_type, existing.created_at, now)
+                return Device(existing.id, existing.name, existing.ip, existing.base_url, device_type, existing.created_at, now)
             if existing is not None:
-                raise SmartWateringError(f"device name already exists: {device_name}")
+                raise DeviceNameConflictError(f"device name already exists: {device_name}")
 
             session.add(
                 DeviceRecord(
@@ -98,7 +100,7 @@ class DeviceRegistry:
                 )
             )
 
-        return Device(device_name, ip, base_url, device_type, now, now)
+        return self.get(device_name)
 
     def upsert_discovered(self, ip_or_url: str, device_type: str, name: str) -> Device:
         """Store the identity reported by an online controller without changing it."""
@@ -110,7 +112,7 @@ class DeviceRegistry:
         ip, base_url = self.normalize_base_url(ip_or_url)
         now = time.time()
         with self.store.session() as session:
-            existing = session.get(DeviceRecord, name)
+            existing = session.scalar(select(DeviceRecord).where(DeviceRecord.name == name))
             if device_type == DeviceType.TANK:
                 self.demote_other_tanks(session, name, now)
             if existing is None:
@@ -132,7 +134,7 @@ class DeviceRegistry:
                 existing.updated_at = now
                 created_at = existing.created_at
 
-        return Device(name, ip, base_url, device_type, created_at, now)
+        return self.get(name)
 
     def validate_config_update(self, current_name: str, config: dict[str, Any]) -> Device:
         device = self.get(current_name)
@@ -143,10 +145,10 @@ class DeviceRegistry:
             raise SmartWateringError(f"unsupported device type: {new_type}")
 
         with self.store.session() as session:
-            if new_name != current_name and session.get(DeviceRecord, new_name) is not None:
-                raise SmartWateringError(f"device name already exists: {new_name}")
+            if new_name != current_name and session.scalar(select(DeviceRecord).where(DeviceRecord.name == new_name)) is not None:
+                raise DeviceNameConflictError(f"device name already exists: {new_name}")
 
-        return Device(new_name, device.ip, device.base_url, new_type, device.created_at, time.time())
+        return Device(device.id, new_name, device.ip, device.base_url, new_type, device.created_at, time.time())
 
     def apply_confirmed_config(self, current_name: str, config: dict[str, Any]) -> Device:
         device = self.get(current_name)
@@ -158,54 +160,45 @@ class DeviceRegistry:
 
         now = time.time()
         with self.store.session() as session:
-            if new_name != current_name and session.get(DeviceRecord, new_name) is not None:
-                raise SmartWateringError(f"device name already exists: {new_name}")
+            if new_name != current_name and session.scalar(select(DeviceRecord).where(DeviceRecord.name == new_name)) is not None:
+                raise DeviceNameConflictError(f"device name already exists: {new_name}")
 
             if new_type == DeviceType.TANK:
                 self.demote_other_tanks(session, new_name, now)
 
-            if new_name != current_name:
-                session.execute(delete(CommandQueueRecord).where(CommandQueueRecord.device_name == current_name))
-                existing = session.get(DeviceRecord, current_name)
-                if existing is not None:
-                    session.delete(existing)
-
-            updated = session.get(DeviceRecord, new_name)
+            updated = session.get(DeviceRecord, device.id)
             if updated is None:
-                session.add(
-                    DeviceRecord(
-                        name=new_name,
-                        ip=device.ip,
-                        base_url=device.base_url,
-                        device_type=new_type,
-                        created_at=device.created_at,
-                        updated_at=now,
-                    )
-                )
-            else:
-                updated.ip = device.ip
-                updated.base_url = device.base_url
-                updated.device_type = new_type
-                updated.updated_at = now
+                raise SmartWateringError(f"unknown device: {current_name}")
+            updated.name = new_name
+            updated.ip = device.ip
+            updated.base_url = device.base_url
+            updated.device_type = new_type
+            updated.updated_at = now
+            try:
+                session.flush()
+            except IntegrityError as exc:
+                raise DeviceNameConflictError(
+                    f"device name already exists: {new_name}"
+                ) from exc
 
-        return Device(new_name, device.ip, device.base_url, new_type, device.created_at, now)
+        return Device(device.id, new_name, device.ip, device.base_url, new_type, device.created_at, now)
 
     def list(self) -> list[Device]:
         with self.store.session() as session:
             rows = session.scalars(select(DeviceRecord).order_by(DeviceRecord.device_type, DeviceRecord.name)).all()
         return [
-            Device(row.name, row.ip, row.base_url, row.device_type, row.created_at, row.updated_at)
+            Device(row.id, row.name, row.ip, row.base_url, row.device_type, row.created_at, row.updated_at)
             for row in rows
         ]
 
     def get(self, name: str) -> Device:
         with self.store.session() as session:
-            row = session.get(DeviceRecord, name)
+            row = session.scalar(select(DeviceRecord).where(DeviceRecord.name == name))
 
         if row is None:
             raise SmartWateringError(f"unknown device: {name}")
 
-        return Device(row.name, row.ip, row.base_url, row.device_type, row.created_at, row.updated_at)
+        return Device(row.id, row.name, row.ip, row.base_url, row.device_type, row.created_at, row.updated_at)
 
     def remove(self, name: str) -> None:
         with self.store.session() as session:
@@ -216,7 +209,7 @@ class DeviceRegistry:
     def watering_settings(self, name: str) -> dict[str, float | None]:
         self.get(name)
         with self.store.session() as session:
-            row = session.get(DeviceWateringSettingsRecord, name)
+            row = session.get(DeviceWateringSettingsRecord, self.get(name).id)
         keys = (
             "dry_weight_g", "dry_weight_updated_at", "wet_weight_g",
             "wet_weight_updated_at", "watering_loss_threshold_percent",
@@ -228,9 +221,12 @@ class DeviceRegistry:
         self, name: str, config: dict[str, Any], changed_at: float
     ) -> None:
         with self.store.session() as session:
-            row = session.get(DeviceWateringSettingsRecord, name)
+            device_id = session.scalar(select(DeviceRecord.id).where(DeviceRecord.name == name))
+            if device_id is None:
+                raise SmartWateringError(f"unknown device: {name}")
+            row = session.get(DeviceWateringSettingsRecord, device_id)
             if row is None:
-                row = DeviceWateringSettingsRecord(device_name=name)
+                row = DeviceWateringSettingsRecord(device_id=device_id)
                 session.add(row)
             timestamp_keys = {
                 "dry_weight_g": "dry_weight_updated_at",
@@ -246,13 +242,20 @@ class DeviceRegistry:
 
 class PlantWateringEventStore:
     FIELDS = (
-        "id", "device_name", "event_start_at", "occurred_at",
+        "id", "device_id", "event_start_at", "occurred_at",
         "weight_before_g", "weight_after_g", "amount_g", "source",
         "fertilized", "invalid", "detected_at", "updated_at",
     )
 
     def __init__(self, store: SQLiteStore) -> None:
         self.store = store
+
+    @staticmethod
+    def _device_id(session: Session, name: str) -> str:
+        device_id = session.scalar(select(DeviceRecord.id).where(DeviceRecord.name == name))
+        if device_id is None:
+            raise SmartWateringError(f"unknown device: {name}")
+        return device_id
 
     @classmethod
     def to_mapping(cls, row: PlantWateringEventRecord) -> dict[str, Any]:
@@ -266,9 +269,10 @@ class PlantWateringEventStore:
     ) -> tuple[dict[str, Any], bool]:
         now = detected_at if detected_at is not None else time.time()
         with self.store.session() as session:
+            device_id = self._device_id(session, device_name)
             row = session.scalar(
                 select(PlantWateringEventRecord).where(
-                    PlantWateringEventRecord.device_name == device_name,
+                    PlantWateringEventRecord.device_id == device_id,
                     PlantWateringEventRecord.event_start_at == event["event_start_at"],
                 )
             )
@@ -276,7 +280,7 @@ class PlantWateringEventStore:
             if row is None:
                 row = session.scalar(
                     select(PlantWateringEventRecord).where(
-                        PlantWateringEventRecord.device_name == device_name,
+                        PlantWateringEventRecord.device_id == device_id,
                         PlantWateringEventRecord.occurred_at == event["occurred_at"],
                         PlantWateringEventRecord.weight_after_g
                         == event["weight_after_g"],
@@ -285,7 +289,7 @@ class PlantWateringEventStore:
             created = row is None
             if row is None:
                 row = PlantWateringEventRecord(
-                    device_name=device_name,
+                    device_id=device_id,
                     event_start_at=event["event_start_at"],
                     occurred_at=event["occurred_at"],
                     weight_before_g=event["weight_before_g"],
@@ -314,9 +318,10 @@ class PlantWateringEventStore:
         self, device_name: str, limit: int, offset: int
     ) -> tuple[list[dict[str, Any]], bool]:
         with self.store.session() as session:
+            device_id = self._device_id(session, device_name)
             rows = session.scalars(
                 select(PlantWateringEventRecord).where(
-                    PlantWateringEventRecord.device_name == device_name,
+                    PlantWateringEventRecord.device_id == device_id,
                     PlantWateringEventRecord.invalid == 0,
                 ).order_by(
                     PlantWateringEventRecord.occurred_at.desc(),
@@ -333,8 +338,9 @@ class PlantWateringEventStore:
         with self.store.session() as session:
             statement = delete(PlantWateringEventRecord)
             if device_name is not None:
+                device_id = self._device_id(session, device_name)
                 statement = statement.where(
-                    PlantWateringEventRecord.device_name == device_name
+                    PlantWateringEventRecord.device_id == device_id
                 )
             result = session.execute(statement)
         return int(result.rowcount or 0)
@@ -342,10 +348,11 @@ class PlantWateringEventStore:
     def invalidate(self, device_name: str, event_id: int) -> bool:
         now = time.time()
         with self.store.session() as session:
+            device_id = self._device_id(session, device_name)
             result = session.execute(
                 update(PlantWateringEventRecord).where(
                     PlantWateringEventRecord.id == event_id,
-                    PlantWateringEventRecord.device_name == device_name,
+                    PlantWateringEventRecord.device_id == device_id,
                     PlantWateringEventRecord.invalid == 0,
                 ).values(invalid=1, updated_at=now)
             )
@@ -356,10 +363,11 @@ class PlantWateringEventStore:
     ) -> dict[str, Any] | None:
         now = time.time()
         with self.store.session() as session:
+            device_id = self._device_id(session, device_name)
             row = session.scalar(
                 select(PlantWateringEventRecord).where(
                     PlantWateringEventRecord.id == event_id,
-                    PlantWateringEventRecord.device_name == device_name,
+                    PlantWateringEventRecord.device_id == device_id,
                     PlantWateringEventRecord.invalid == 0,
                 )
             )
@@ -373,9 +381,10 @@ class PlantWateringEventStore:
     def invalidate_above_amount(self, device_name: str, max_amount_g: float) -> int:
         now = time.time()
         with self.store.session() as session:
+            device_id = self._device_id(session, device_name)
             result = session.execute(
                 update(PlantWateringEventRecord).where(
-                    PlantWateringEventRecord.device_name == device_name,
+                    PlantWateringEventRecord.device_id == device_id,
                     PlantWateringEventRecord.invalid == 0,
                     PlantWateringEventRecord.amount_g > max_amount_g,
                 ).values(invalid=1, updated_at=now)
@@ -384,9 +393,10 @@ class PlantWateringEventStore:
 
     def invalidate_exact_duplicates(self, device_name: str) -> int:
         with self.store.session() as session:
+            device_id = self._device_id(session, device_name)
             rows = session.scalars(
                 select(PlantWateringEventRecord).where(
-                    PlantWateringEventRecord.device_name == device_name
+                    PlantWateringEventRecord.device_id == device_id
                 ).order_by(PlantWateringEventRecord.id)
             ).all()
             grouped: dict[tuple[float, float, float], list[PlantWateringEventRecord]] = {}
@@ -414,9 +424,10 @@ class PlantWateringEventStore:
     ) -> int:
         now = time.time()
         with self.store.session() as session:
+            device_id = self._device_id(session, device_name)
             result = session.execute(
                 update(PlantWateringEventRecord).where(
-                    PlantWateringEventRecord.device_name == device_name,
+                    PlantWateringEventRecord.device_id == device_id,
                     PlantWateringEventRecord.invalid == 0,
                     PlantWateringEventRecord.occurred_at > start,
                     PlantWateringEventRecord.occurred_at < end,
@@ -635,10 +646,12 @@ class OperationLog:
         payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
         with self.store.session() as session:
+            device_id = session.scalar(select(DeviceRecord.id).where(DeviceRecord.name == device_name))
             session.add(
                 OperationRecord(
                     operation_id=operation_id,
-                    device_name=device_name,
+                    device_id=device_id,
+                    target_name=device_name if device_id is None else None,
                     operation_type=operation_type,
                     payload_json=payload_json,
                     status=OP_QUEUED,
@@ -733,6 +746,19 @@ class OperationLog:
             except (json.JSONDecodeError, SmartWateringError) as exc:
                 self.log(
                     f"confirmed config apply skipped operation_id={operation_id} "
+                    f"device={device_name} reason={exc}"
+                )
+        elif operation_type == "device_status" and status == OP_SUCCESS:
+            try:
+                result = json.loads(row.result_json or "{}")
+                config = result.get("config") if isinstance(result, dict) else None
+                if isinstance(config, dict):
+                    DeviceRegistry(self.store).confirm_watering_settings(
+                        device_name, config, now
+                    )
+            except (json.JSONDecodeError, SmartWateringError) as exc:
+                self.log(
+                    f"status settings recovery skipped operation_id={operation_id} "
                     f"device={device_name} reason={exc}"
                 )
 
@@ -1173,6 +1199,7 @@ class CommandQueue:
         return QueuedCommand(
             id=row.id,
             operation_id=row.operation_id,
+            device_id=row.device_id,
             device_name=row.device_name,
             base_url=row.base_url,
             path=row.path,
@@ -1238,6 +1265,7 @@ class CommandQueue:
         now = time.time()
 
         with self.store.session() as session:
+            device_id = session.scalar(select(DeviceRecord.id).where(DeviceRecord.name == device_name))
             if drop_fill_commands:
                 session.execute(delete(CommandQueueRecord).where(CommandQueueRecord.path == "/watering/start"))
 
@@ -1260,7 +1288,8 @@ class CommandQueue:
             session.add(
                 CommandQueueRecord(
                     operation_id=operation_id,
-                    device_name=device_name,
+                    device_id=device_id,
+                    target_name=device_name if device_id is None else None,
                     base_url=base_url,
                     path=path,
                     method=method,
@@ -1322,7 +1351,8 @@ class CommandQueue:
             session.flush()
             deferred = CommandQueueRecord(
                 operation_id=command.operation_id,
-                device_name=command.device_name,
+                device_id=command.device_id,
+                target_name=command.device_name if command.device_id is None else None,
                 base_url=command.base_url,
                 path=command.path,
                 method=command.method,

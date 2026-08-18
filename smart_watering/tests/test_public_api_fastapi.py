@@ -110,6 +110,27 @@ def test_fastapi_registers_documented_v2_routes() -> None:
         )
 
 
+def test_device_rename_to_existing_name_returns_conflict() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        client, cli = make_client(temp_dir)
+        cli.auth.add_user("client", "secret-password")
+        cli.registry.add("10.0.0.1", "plant", "plant_1")
+        cli.registry.add("10.0.0.2", "plant", "plant_2")
+        token = client.post(
+            "/api/v2/auth/login",
+            json={"username": "client", "password": "secret-password"},
+        ).json()["token"]
+
+        response = client.post(
+            "/api/v2/devices/plant_1/config",
+            json={"name": "plant_2"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["error"] == "device_name_conflict"
+
+
 def test_mutating_request_with_idempotency_key_replays_original_response() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         client, cli = make_client(temp_dir)

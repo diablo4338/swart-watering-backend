@@ -108,6 +108,7 @@ class SmartWateringService:
         self, device: Device, config: dict, description: str,
         confirm_retry_duplicate: bool = False,
     ) -> str | None:
+        self.registry.validate_config_update(device.name, config)
         payload = {
             "device_type": config.get("device_type", device.device_type),
             "name": config.get("name", device.name),

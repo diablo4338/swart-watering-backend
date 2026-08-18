@@ -575,7 +575,7 @@ def test_store_rejects_uncreatable_database_path() -> None:
             raise AssertionError("expected SmartWateringError")
 
 
-def test_device_name_is_database_primary_key() -> None:
+def test_device_has_stable_primary_key_and_unique_name() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test.db"
         store = smart_core.SQLiteStore(str(db_path))
@@ -583,11 +583,64 @@ def test_device_name_is_database_primary_key() -> None:
         connection = sqlite3.connect(db_path)
         try:
             columns = connection.execute("PRAGMA table_info(devices)").fetchall()
+            indexes = connection.execute("PRAGMA index_list(devices)").fetchall()
         finally:
             connection.close()
 
+        id_column = next(column for column in columns if column[1] == "id")
         name_column = next(column for column in columns if column[1] == "name")
-        assert name_column[5] == 1
+        assert id_column[5] == 1
+        assert name_column[5] == 0
+        assert any(index[1] == "ix_devices_name" and index[2] == 1 for index in indexes)
+
+
+def test_confirmed_rename_preserves_device_identity_and_related_data() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        device = app.registry.add("192.168.1.10", "plant", "plant_1")
+        app.registry.confirm_watering_settings("plant_1", {"dry_weight_g": 120}, 1.0)
+        app.plant_waterings.upsert_detected(
+            "plant_1",
+            {
+                "event_start_at": 10.0,
+                "occurred_at": 11.0,
+                "weight_before_g": 200.0,
+                "weight_after_g": 250.0,
+                "amount_g": 50.0,
+            },
+        )
+        operation_id = app.operations.create("plant_1", "device_status", {})
+
+        renamed = app.registry.apply_confirmed_config("plant_1", {"name": "fern"})
+
+        assert renamed.id == device.id
+        assert app.registry.watering_settings("fern")["dry_weight_g"] == 120
+        assert len(app.plant_waterings.list_valid("fern")) == 1
+        assert app.operations.detail(operation_id)["device"] == "fern"
+
+
+def test_successful_status_recovers_missing_watering_settings() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.registry.add("192.168.1.10", "plant", "fern")
+        operation_id = app.operations.create("fern", "device_status", {})
+        app.operations.update_result(
+            operation_id,
+            {
+                "config": {
+                    "dry_weight_g": 120,
+                    "wet_weight_g": 510,
+                    "watering_loss_threshold_percent": 35,
+                }
+            },
+        )
+
+        app.operations.event(operation_id, "success", "status_received")
+
+        settings = app.registry.watering_settings("fern")
+        assert settings["dry_weight_g"] == 120
+        assert settings["wet_weight_g"] == 510
+        assert settings["watering_loss_threshold_percent"] == 35
 
 
 def test_watering_setting_dates_are_updated_per_field_after_confirmed_changes() -> None:

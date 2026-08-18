@@ -1,4 +1,5 @@
 import os
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -6,12 +7,12 @@ from typing import Any
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import (
-    CheckConstraint, Float, ForeignKey, Index, Integer, String, UniqueConstraint,
-    create_engine,
+    CheckConstraint, Float, ForeignKey, Index, Integer, String, UniqueConstraint, func,
+    create_engine, select,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, column_property, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
 
 
@@ -27,7 +28,8 @@ class DeviceRecord(Base):
     __tablename__ = "devices"
     __table_args__ = (CheckConstraint("device_type IN ('plant', 'tank')", name="ck_devices_device_type"),)
 
-    name: Mapped[str] = mapped_column(String, primary_key=True)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
     ip: Mapped[str] = mapped_column(String, nullable=False)
     base_url: Mapped[str] = mapped_column(String, nullable=False)
     device_type: Mapped[str] = mapped_column(String, nullable=False)
@@ -38,8 +40,8 @@ class DeviceRecord(Base):
 class DeviceWateringSettingsRecord(Base):
     __tablename__ = "device_watering_settings"
 
-    device_name: Mapped[str] = mapped_column(
-        String, ForeignKey("devices.name", ondelete="CASCADE"), primary_key=True,
+    device_id: Mapped[str] = mapped_column(
+        String, ForeignKey("devices.id", ondelete="CASCADE"), primary_key=True,
     )
     dry_weight_g: Mapped[int | None] = mapped_column(Integer, nullable=True)
     dry_weight_updated_at: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -53,7 +55,13 @@ class OperationRecord(Base):
     __tablename__ = "operations"
 
     operation_id: Mapped[str] = mapped_column(String, primary_key=True)
-    device_name: Mapped[str] = mapped_column(String, nullable=False)
+    device_id: Mapped[str] = mapped_column(
+        String, ForeignKey("devices.id", ondelete="RESTRICT"), nullable=True, index=True,
+    )
+    target_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    device_name: Mapped[str] = column_property(
+        func.coalesce(select(DeviceRecord.name).where(DeviceRecord.id == device_id).scalar_subquery(), target_name)
+    )
     operation_type: Mapped[str] = mapped_column(String, nullable=False)
     payload_json: Mapped[str | None] = mapped_column(String, nullable=True)
     result_json: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -85,7 +93,13 @@ class CommandQueueRecord(Base):
         ForeignKey("operations.operation_id", ondelete="CASCADE"),
         nullable=False,
     )
-    device_name: Mapped[str] = mapped_column(String, nullable=False)
+    device_id: Mapped[str] = mapped_column(
+        String, ForeignKey("devices.id", ondelete="CASCADE"), nullable=True, index=True,
+    )
+    target_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    device_name: Mapped[str] = column_property(
+        func.coalesce(select(DeviceRecord.name).where(DeviceRecord.id == device_id).scalar_subquery(), target_name)
+    )
     base_url: Mapped[str] = mapped_column(String, nullable=False)
     path: Mapped[str] = mapped_column(String, nullable=False)
     method: Mapped[str] = mapped_column(String, nullable=False)
@@ -136,20 +150,23 @@ class PlantWateringEventRecord(Base):
     __tablename__ = "plant_watering_events"
     __table_args__ = (
         UniqueConstraint(
-            "device_name", "event_start_at",
+            "device_id", "event_start_at",
             name="uq_plant_watering_events_device_start",
         ),
         Index(
             "ix_plant_watering_events_device_occurred",
-            "device_name", "occurred_at",
+            "device_id", "occurred_at",
         ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    device_name: Mapped[str] = mapped_column(
+    device_id: Mapped[str] = mapped_column(
         String,
-        ForeignKey("devices.name", ondelete="CASCADE"),
+        ForeignKey("devices.id", ondelete="CASCADE"),
         nullable=False,
+    )
+    device_name: Mapped[str] = column_property(
+        select(DeviceRecord.name).where(DeviceRecord.id == device_id).scalar_subquery()
     )
     event_start_at: Mapped[float] = mapped_column(Float, nullable=False)
     occurred_at: Mapped[float] = mapped_column(Float, nullable=False)

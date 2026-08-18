@@ -99,6 +99,10 @@ class SmartWateringError(RuntimeError):
     pass
 
 
+class DeviceNameConflictError(SmartWateringError):
+    pass
+
+
 def parse_positive_int(raw_value: str, name: str) -> int:
     try:
         value = int(raw_value)
@@ -151,6 +155,7 @@ def resolve_db_path() -> str:
 
 @dataclass
 class Device:
+    id: str
     name: str
     ip: str
     base_url: str
@@ -163,6 +168,7 @@ class Device:
 class QueuedCommand:
     id: int
     operation_id: str
+    device_id: str | None
     device_name: str
     base_url: str
     path: str

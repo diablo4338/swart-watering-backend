@@ -5,7 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
-from smart_watering.domain import SmartWateringError
+from smart_watering.domain import DeviceNameConflictError, SmartWateringError
 
 from .errors import PublicApiError
 from .idempotency import IdempotencyMiddleware
@@ -40,6 +40,13 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
         return JSONResponse(
             status_code=exc.status_code,
             content={"error": exc.code, "message": str(exc)},
+        )
+
+    @app.exception_handler(DeviceNameConflictError)
+    async def device_name_conflict(_request: Request, exc: DeviceNameConflictError) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={"error": "device_name_conflict", "message": str(exc)},
         )
 
     @app.exception_handler(SmartWateringError)
