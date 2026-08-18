@@ -101,7 +101,6 @@ Smoke tests and helper scripts:
 | `SMART_WATERING_PASSWORD` | fallback to `USER_PASSWORD` | smoke test | Password for password login during the smoke test. |
 | `USER_USERNAME` | none | smoke test | Legacy fallback username variable. |
 | `USER_PASSWORD` | none | smoke test | Legacy fallback password variable. |
-| `SMART_WATERING_CLI_CONTAINER` | `smart-watering-cli` | host helper scripts | Override the Docker CLI helper container name. |
 
 ## Quick Start
 
@@ -119,24 +118,38 @@ Run the interactive CLI:
 python -m smart_watering
 ```
 
-Run the production image stack directly with Docker Compose:
+## Portainer Git Stack
+
+Create a Git-backed Stack in Portainer with these settings:
+
+- repository: this repository;
+- Compose path: `docker/docker-compose.yml`;
+- environment variables: copy the values from `docker/.env.example` and replace
+  at least `SMART_WATERING_NODE_URL` and `SMART_WATERING_PUBLIC_API_JWT_SECRET`.
+
+Portainer builds one local `smart-watering` image from the checked-out commit and
+uses it for every Python service. No registry, prebuilt image or image pull is
+required. Enable Git auto-update/webhooks in Portainer if deployments should follow
+repository updates automatically.
+
+The same stack can be built and started directly with Docker Compose:
 
 ```bash
 cp docker/.env.example docker/.env
-# edit SMART_WATERING_IMAGE_REPOSITORY, SMART_WATERING_IMAGE_TAG, SMART_WATERING_NODE_URL and SMART_WATERING_PUBLIC_API_JWT_SECRET
-docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
+# edit SMART_WATERING_NODE_URL and SMART_WATERING_PUBLIC_API_JWT_SECRET
+docker compose --env-file docker/.env -f docker/docker-compose.yml up --build -d
 ```
 
-Run the stack directly from the current checkout without publishing images:
+Or use the Makefile shortcuts:
 
 ```bash
 make restart
 ```
 
-`make build`, `make restart`, and `make cli` use
-`docker/docker-compose.local.yml`. `make restart` performs a complete
-stop, build, recreate, and detached start. `make publish` builds and pushes
-the production images.
+`make build`, `make up`, and `make restart` all use the same Compose file as
+Portainer. The `cli` service stays running so commands can be executed from the
+Portainer container console without SSH. Locally, use
+`make cli CLI_ARGS="devices list"`.
 
 Run the public API watering smoke test:
 
@@ -144,13 +157,6 @@ Run the public API watering smoke test:
 cp examples/.env.smoke.example examples/.env.smoke
 # edit examples/.env.smoke
 python examples/public-api-watering-smoke-test.py --target-g 1
-```
-
-Build and push Docker Hub images from a source checkout:
-
-```bash
-docker login
-make publish
 ```
 
 ## Android Release Publishing
@@ -183,6 +189,6 @@ Client build and test-publication commands are documented in
 ```bash
 python -m compileall -q smart_watering
 pytest -v smart_watering/tests
-docker compose --env-file docker/.env.example -f docker/docker-compose.local.yml config --quiet
-docker compose --env-file docker/.env.example -f docker/docker-compose.yml -f docker/docker-compose.build.yml config --quiet
+docker compose --env-file docker/.env.example -f docker/docker-compose.yml config --quiet
+docker compose --env-file docker/.env.example -f docker/docker-compose.yml build
 ```

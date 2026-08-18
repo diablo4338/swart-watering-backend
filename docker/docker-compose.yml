@@ -1,84 +1,75 @@
 name: smart-watering
 
+# Portainer Git Stack builds this image directly from the checked-out repository.
+x-python-service: &python-service
+  image: smart-watering:local
+  restart: unless-stopped
+  environment: &common-environment
+    SMART_WATERING_DB_PATH: /data/smart_watering.db
+    SMART_WATERING_NODE_URL: ${SMART_WATERING_NODE_URL:-}
+    TMPDIR: /data
+  volumes:
+    - smart-watering-data:/data
+
 services:
   smart-watering:
-    container_name: smart-watering-node
-    image: ${SMART_WATERING_IMAGE_REPOSITORY:?set SMART_WATERING_IMAGE_REPOSITORY in docker/.env}/smart-watering-node:${SMART_WATERING_IMAGE_TAG:?set SMART_WATERING_IMAGE_TAG in docker/.env}
-    restart: unless-stopped
+    <<: *python-service
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    entrypoint: ["uvicorn", "smart_watering.callback_app.asgi:app"]
+    command: ["--host", "0.0.0.0", "--port", "8080", "--no-access-log"]
     ports:
       - "${SMART_WATERING_PORT:-8080}:8080"
-    environment:
-      SMART_WATERING_DB_PATH: /data/smart_watering.db
-      SMART_WATERING_NODE_URL: ${SMART_WATERING_NODE_URL:-}
-      TMPDIR: /data
-    volumes:
-      - smart-watering-data:/data
 
   worker:
-    image: ${SMART_WATERING_IMAGE_REPOSITORY:?set SMART_WATERING_IMAGE_REPOSITORY in docker/.env}/smart-watering-worker:${SMART_WATERING_IMAGE_TAG:?set SMART_WATERING_IMAGE_TAG in docker/.env}
-    container_name: smart-watering-worker
+    <<: *python-service
     depends_on:
       - smart-watering
-    restart: unless-stopped
+    entrypoint: ["python", "-m", "smart_watering.jobs.worker"]
     environment:
-      SMART_WATERING_DB_PATH: /data/smart_watering.db
-      SMART_WATERING_NODE_URL: ${SMART_WATERING_NODE_URL:-}
+      <<: *common-environment
       SMART_WATERING_WORKER_IDLE_INTERVAL_SEC: ${SMART_WATERING_WORKER_IDLE_INTERVAL_SEC:-1}
       SMART_WATERING_WORKER_RETRY_INTERVAL_SEC: ${SMART_WATERING_WORKER_RETRY_INTERVAL_SEC:-5}
       SMART_WATERING_WORKER_MAX_WAIT_SEC: ${SMART_WATERING_WORKER_MAX_WAIT_SEC:-900}
-      TMPDIR: /data
-    volumes:
-      - smart-watering-data:/data
 
   snapshotter:
-    image: ${SMART_WATERING_IMAGE_REPOSITORY:?set SMART_WATERING_IMAGE_REPOSITORY in docker/.env}/smart-watering-worker:${SMART_WATERING_IMAGE_TAG:?set SMART_WATERING_IMAGE_TAG in docker/.env}
-    container_name: smart-watering-snapshotter
-    entrypoint: ["python", "-m", "smart_watering.jobs.snapshotter"]
+    <<: *python-service
     depends_on:
       - worker
-    restart: unless-stopped
+    entrypoint: ["python", "-m", "smart_watering.jobs.snapshotter"]
     environment:
-      SMART_WATERING_DB_PATH: /data/smart_watering.db
-      SMART_WATERING_NODE_URL: ${SMART_WATERING_NODE_URL:-}
+      <<: *common-environment
       SMART_WATERING_SNAPSHOT_INTERVAL_SEC: ${SMART_WATERING_SNAPSHOT_INTERVAL_SEC:-300}
-      TMPDIR: /data
-    volumes:
-      - smart-watering-data:/data
 
   watering-detector:
-    image: ${SMART_WATERING_IMAGE_REPOSITORY:?set SMART_WATERING_IMAGE_REPOSITORY in docker/.env}/smart-watering-worker:${SMART_WATERING_IMAGE_TAG:?set SMART_WATERING_IMAGE_TAG in docker/.env}
-    container_name: smart-watering-watering-detector
-    entrypoint: ["python", "-m", "smart_watering.jobs.watering_detector"]
+    <<: *python-service
     depends_on:
       - worker
-    restart: unless-stopped
+    entrypoint: ["python", "-m", "smart_watering.jobs.watering_detector"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      SMART_WATERING_DB_PATH: /data/smart_watering.db
+      <<: *common-environment
       SMART_WATERING_PROMETHEUS_URL: ${SMART_WATERING_PROMETHEUS_URL:-http://host.docker.internal:9090}
       SMART_WATERING_DETECTOR_INTERVAL_SEC: ${SMART_WATERING_DETECTOR_INTERVAL_SEC:-3600}
       SMART_WATERING_DETECTOR_LOOKBACK_HOURS: ${SMART_WATERING_DETECTOR_LOOKBACK_HOURS:-3}
       SMART_WATERING_DETECTION_WINDOW_MIN: ${SMART_WATERING_DETECTION_WINDOW_MIN:-5}
       SMART_WATERING_MAX_DETECTED_WATERING_G: ${SMART_WATERING_MAX_DETECTED_WATERING_G:-1000}
-      TMPDIR: /data
-    volumes:
-      - smart-watering-data:/data
 
   public-api:
-    image: ${SMART_WATERING_IMAGE_REPOSITORY:?set SMART_WATERING_IMAGE_REPOSITORY in docker/.env}/smart-watering-public-api:${SMART_WATERING_IMAGE_TAG:?set SMART_WATERING_IMAGE_TAG in docker/.env}
-    container_name: smart-watering-public-api
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    <<: *python-service
     depends_on:
       - snapshotter
-    restart: unless-stopped
+    entrypoint: ["uvicorn", "smart_watering.public_api_app.asgi:app"]
+    command: ["--host", "0.0.0.0", "--port", "8081", "--no-access-log"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${SMART_WATERING_PUBLIC_API_PORT:-8081}:8081"
     environment:
-      SMART_WATERING_DB_PATH: /data/smart_watering.db
-      SMART_WATERING_NODE_URL: ${SMART_WATERING_NODE_URL:-}
-      SMART_WATERING_PUBLIC_API_JWT_SECRET: ${SMART_WATERING_PUBLIC_API_JWT_SECRET:-}
+      <<: *common-environment
+      SMART_WATERING_PUBLIC_API_JWT_SECRET: ${SMART_WATERING_PUBLIC_API_JWT_SECRET:?set SMART_WATERING_PUBLIC_API_JWT_SECRET}
       SMART_WATERING_PUBLIC_API_SESSION_TTL_SEC: ${SMART_WATERING_PUBLIC_API_SESSION_TTL_SEC:-3600}
       SMART_WATERING_GOOGLE_WEB_CLIENT_ID: ${SMART_WATERING_GOOGLE_WEB_CLIENT_ID:-}
       SMART_WATERING_GOOGLE_ALLOWED_EMAILS: ${SMART_WATERING_GOOGLE_ALLOWED_EMAILS:-}
@@ -90,31 +81,24 @@ services:
       SMART_WATERING_CONSUMPTION_DROP_THRESHOLD_PERCENT: ${SMART_WATERING_CONSUMPTION_DROP_THRESHOLD_PERCENT:-30}
       SMART_WATERING_CONSUMPTION_MEDIAN_DAYS: ${SMART_WATERING_CONSUMPTION_MEDIAN_DAYS:-5}
       SMART_WATERING_ANDROID_RELEASES_DIR: /releases
-      TMPDIR: /data
     volumes:
       - smart-watering-data:/data
       - ${SMART_WATERING_ANDROID_RELEASES_DIR:-./releases}:/releases:ro
 
   cli:
-    image: ${SMART_WATERING_IMAGE_REPOSITORY:?set SMART_WATERING_IMAGE_REPOSITORY in docker/.env}/smart-watering-cli:${SMART_WATERING_IMAGE_TAG:?set SMART_WATERING_IMAGE_TAG in docker/.env}
-    container_name: smart-watering-cli
+    <<: *python-service
+    depends_on:
+      - worker
     entrypoint: ["sleep", "infinity"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      - worker
-    restart: unless-stopped
     stdin_open: true
     tty: true
     environment:
-      SMART_WATERING_DB_PATH: /data/smart_watering.db
-      SMART_WATERING_NODE_URL: ${SMART_WATERING_NODE_URL:-}
+      <<: *common-environment
       SMART_WATERING_CLI_OPERATION_WAIT_TIMEOUT_SEC: ${SMART_WATERING_CLI_OPERATION_WAIT_TIMEOUT_SEC:-900}
       SMART_WATERING_PROMETHEUS_URL: ${SMART_WATERING_PROMETHEUS_URL:-http://host.docker.internal:9090}
       SMART_WATERING_MAX_DETECTED_WATERING_G: ${SMART_WATERING_MAX_DETECTED_WATERING_G:-1000}
-      TMPDIR: /data
-    volumes:
-      - smart-watering-data:/data
 
 volumes:
   smart-watering-data:

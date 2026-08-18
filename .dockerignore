@@ -1,0 +1,9 @@
+.git
+.idea
+.venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+client
+docker/releases
+firmware

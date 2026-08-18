@@ -16,4 +16,3 @@ RUN mkdir -p /data
 
 VOLUME ["/data"]
 
-ENTRYPOINT ["python", "-m", "smart_watering"]

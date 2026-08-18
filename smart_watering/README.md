@@ -353,34 +353,31 @@ Compose starts the Python nodes as separate services:
 - `worker` - queue worker.
 - `snapshotter` - periodic status snapshot enqueue process.
 - `public-api` - public API on host port `8081`.
-- `cli` - idle helper container for running CLI commands.
+- `watering-detector` - periodic watering detection process.
+- `cli` - idle management container available through the Portainer console.
 
 Setup:
 
 ```bash
 cp docker/.env.example docker/.env
-# edit SMART_WATERING_IMAGE_REPOSITORY and SMART_WATERING_IMAGE_TAG
 # edit SMART_WATERING_NODE_URL to the LAN-reachable Docker host URL
 # edit SMART_WATERING_PUBLIC_API_JWT_SECRET
-docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
+docker compose --env-file docker/.env -f docker/docker-compose.yml up --build -d
 ```
 
-Build and push images from a source checkout:
+Run CLI commands through the management container:
 
 ```bash
-docker login
-make publish
+make cli CLI_ARGS="devices list"
+make cli CLI_ARGS="users add mobile-app"
+make cli CLI_ARGS="users drop mobile-app"
+make cli CLI_ARGS="fill main_tank 200"
+make cli CLI_ARGS="operations"
 ```
 
-Run CLI commands through the helper container:
-
-```bash
-docker exec -it smart-watering-cli python -m smart_watering devices list
-docker exec -it smart-watering-cli python -m smart_watering users add mobile-app
-docker exec -it smart-watering-cli python -m smart_watering users drop mobile-app
-docker exec -it smart-watering-cli python -m smart_watering fill main_tank 200
-docker exec -it smart-watering-cli python -m smart_watering operations
-```
+In Portainer, open the `cli` container console with `/bin/sh`, then run the same
+commands as `python -m smart_watering devices list`, `python -m smart_watering
+operations`, and so on.
 
 Inspect logs:
 
@@ -403,32 +400,11 @@ Remove containers and the SQLite volume:
 docker compose --env-file docker/.env -f docker/docker-compose.yml down -v
 ```
 
-## Helper Scripts
-
-Host wrappers live in `scripts/` and connect to the already-running `smart-watering-cli` container.
-
-Linux/macOS:
-
-```bash
-chmod +x scripts/smart-watering-cli.sh
-scripts/smart-watering-cli.sh
-scripts/smart-watering-cli.sh devices list
-```
-
-Windows PowerShell:
-
-```powershell
-.\scripts\smart-watering-cli.ps1
-.\scripts\smart-watering-cli.ps1 devices list
-```
-
-If the container has a different name, set `SMART_WATERING_CLI_CONTAINER`.
-
 ## Tests
 
 ```bash
 python -m compileall -q smart_watering
 pytest -v smart_watering/tests
 make ENV_FILE=docker/.env.example config
-make ENV_FILE=docker/.env.example config-build
+make ENV_FILE=docker/.env.example build
 ```
