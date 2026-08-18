@@ -200,6 +200,23 @@ class DeviceRegistry:
 
         return Device(row.id, row.name, row.ip, row.base_url, row.device_type, row.created_at, row.updated_at)
 
+    def is_name_available(self, name: str, current_name: str | None = None) -> bool:
+        candidate = name.strip()
+        if not candidate:
+            return False
+        with self.store.session() as session:
+            owner_id = session.scalar(
+                select(DeviceRecord.id).where(DeviceRecord.name == candidate)
+            )
+            if owner_id is None:
+                return True
+            if current_name is None:
+                return False
+            current_id = session.scalar(
+                select(DeviceRecord.id).where(DeviceRecord.name == current_name)
+            )
+            return current_id is not None and owner_id == current_id
+
     def remove(self, name: str) -> None:
         with self.store.session() as session:
             result = session.execute(delete(DeviceRecord).where(DeviceRecord.name == name))

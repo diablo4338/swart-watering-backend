@@ -131,6 +131,39 @@ def test_device_rename_to_existing_name_returns_conflict() -> None:
         assert response.json()["error"] == "device_name_conflict"
 
 
+def test_device_name_availability_allows_current_owner_and_rejects_other_device() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        client, cli = make_client(temp_dir)
+        cli.auth.add_user("client", "secret-password")
+        cli.registry.add("10.0.0.1", "plant", "plant_1")
+        cli.registry.add("10.0.0.2", "plant", "plant_2")
+        token = client.post(
+            "/api/v2/auth/login",
+            json={"username": "client", "password": "secret-password"},
+        ).json()["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        own = client.get(
+            "/api/v2/device-name-availability",
+            params={"name": "plant_1", "current_name": "plant_1"},
+            headers=headers,
+        )
+        occupied = client.get(
+            "/api/v2/device-name-availability",
+            params={"name": "plant_2", "current_name": "plant_1"},
+            headers=headers,
+        )
+        free = client.get(
+            "/api/v2/device-name-availability",
+            params={"name": "fern", "current_name": "plant_1"},
+            headers=headers,
+        )
+
+        assert own.json()["available"] is True
+        assert occupied.json()["available"] is False
+        assert free.json()["available"] is True
+
+
 def test_mutating_request_with_idempotency_key_replays_original_response() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         client, cli = make_client(temp_dir)

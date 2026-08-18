@@ -29,6 +29,20 @@ def device_types(_session: SessionDep) -> dict[str, list[str]]:
     return {"types": sorted(DEVICE_TYPES)}
 
 
+@router.get("/device-name-availability")
+def device_name_availability(
+    name: str,
+    api: RuntimeDep,
+    _session: SessionDep,
+    current_name: str | None = None,
+) -> dict[str, Any]:
+    candidate = name.strip()
+    return {
+        "name": candidate,
+        "available": api.business.registry.is_name_available(candidate, current_name),
+    }
+
+
 @router.get("/devices/{device_name}/watering-parameters")
 def watering_parameters(device_name: str, api: RuntimeDep, _session: SessionDep) -> dict[str, Any]:
     return {"device": device_name, **api.business.registry.watering_settings(device_name)}
