@@ -127,10 +127,11 @@ Create a Git-backed Stack in Portainer with these settings:
 - environment variables: copy the values from `docker/.env.example` and replace
   at least `SMART_WATERING_NODE_URL` and `SMART_WATERING_PUBLIC_API_JWT_SECRET`.
 
-Portainer builds one local `smart-watering` image from the checked-out commit and
-uses it for every Python service. No registry, prebuilt image or image pull is
-required. Enable Git auto-update/webhooks in Portainer if deployments should follow
-repository updates automatically.
+Portainer builds the service images from the checked-out commit. The Compose file
+does not contain `image` references, so no registry, prebuilt image, Docker login or
+image pull is required. Docker reuses the shared build cache because all services
+use the same Dockerfile. Enable Git auto-update/webhooks in Portainer if deployments
+should follow repository updates automatically.
 
 The same stack can be built and started directly with Docker Compose:
 
