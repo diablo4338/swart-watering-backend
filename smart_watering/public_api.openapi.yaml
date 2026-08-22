@@ -111,6 +111,32 @@ paths:
                     items:
                       type: string
                     example: [plant, tank]
+  /api/v2/devices/{device}/backend-name:
+    put:
+      summary: Change the unique backend name without changing the MCU id
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+      responses:
+        "200":
+          description: Renamed backend device
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+        "409":
+          $ref: "#/components/responses/Error"
   /api/v2/devices/{device}/status/latest:
     get:
       summary: Return the latest stored status snapshot
@@ -650,9 +676,11 @@ components:
           type: number
     Device:
       type: object
-      required: [name, type, has_pending_operations]
+      required: [name, controller_name, type, has_pending_operations]
       properties:
         name:
+          type: string
+        controller_name:
           type: string
         type:
           type: string
@@ -661,6 +689,7 @@ components:
           type: boolean
     DeviceInfo:
       type: object
+      description: Null fields mean that the value is unavailable and must not clear a previously displayed form value.
       properties:
         name:
           type: string
@@ -670,6 +699,7 @@ components:
           nullable: true
     WateringInfo:
       type: object
+      description: Null fields mean that the value is unavailable and must not clear a previously displayed form value.
       required: [active]
       properties:
         active:
@@ -685,6 +715,7 @@ components:
           nullable: true
     DeviceConfig:
       type: object
+      description: Configuration snapshot. Consumers updating an existing form must ignore null fields and retain the last known value.
       properties:
         target_g:
           type: number
@@ -692,7 +723,19 @@ components:
         dry_weight_g:
           type: number
           nullable: true
+        wet_weight_g:
+          type: number
+          nullable: true
+        watering_loss_threshold_percent:
+          type: number
+          nullable: true
         tare_weight_g:
+          type: number
+          nullable: true
+        zero_raw:
+          type: number
+          nullable: true
+        raw_per_gram:
           type: number
           nullable: true
         sleep_disabled:
@@ -705,9 +748,15 @@ components:
       type: object
       minProperties: 1
       properties:
+        backend_name:
+          type: string
+          description: Unique backend name applied only after the MCU confirms the operation successfully.
         device_type:
           type: string
           enum: [plant, tank]
+        backend_name:
+          type: string
+          description: Requested unique backend name; present while the change is pending and after completion.
         name:
           type: string
         dry_weight_g:
@@ -855,6 +904,7 @@ components:
           description: Offset for the next page; null when the history is exhausted.
     DeviceWeight:
       type: object
+      description: Null fields mean that the value is unavailable and must not clear a previously displayed value.
       properties:
         gross_weight_g:
           type: number

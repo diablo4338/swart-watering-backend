@@ -3,6 +3,8 @@ from typing import Annotated
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from smart_watering.domain import SmartWateringError
+
 from .errors import PublicApiError
 from .runtime import ApiRuntime
 from .security import verify_jwt
@@ -27,7 +29,7 @@ def authenticated_session(
         raise PublicApiError("JWT session is missing", 401, "invalid_token")
     try:
         api.business.auth.require_active_session(session_id)
-    except Exception as exc:
+    except SmartWateringError as exc:
         raise PublicApiError(str(exc), 401, "invalid_session") from exc
     return payload
 

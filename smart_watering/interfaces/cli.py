@@ -187,7 +187,8 @@ class SmartWateringCliApp(SmartWateringService):
     def format_main_menu() -> str:
         return "\n".join([
             "", "Smart Watering", "", "Devices",
-            "1. Register device", "2. List devices", "3. Remove device", "4. Configure device", "",
+            "1. Register device", "2. List devices", "3. Remove device", "4. Configure device",
+            "24. Change MCU ID", "",
             "Read", "5. Show device status", "6. Show device metrics", "7. Show device constants", "",
             "Watering", "8. Start watering", "9. Stop watering", "",
             "Device actions", "10. Enable sleep", "11. Disable sleep", "12. Set sleep interval", "13. Set zero", "14. Calibrate scale", "",
@@ -323,6 +324,12 @@ class SmartWateringCliApp(SmartWateringService):
         config.add_argument("name")
         config.add_argument("values", nargs="+")
         add_wait_argument(config)
+        controller_id = device_subparsers.add_parser(
+            "controller-id", help="Queue an MCU id change without changing the backend name"
+        )
+        controller_id.add_argument("name", help="Unique backend device name")
+        controller_id.add_argument("controller_id", help="New id written to the MCU without validation")
+        add_wait_argument(controller_id)
         status = subparsers.add_parser("status", help="Read /watering from a registered device")
         status.add_argument("device")
         constants = subparsers.add_parser("constants", help="Read MCU constants from a registered device")
@@ -532,7 +539,7 @@ class SmartWateringCliApp(SmartWateringService):
             device = self.registry.add(ip_or_url, fallback_type, fallback_name)
             operation_id = self.queue_device_config(
                 device,
-                {"device_type": device.device_type, "name": device.name},
+                {"device_type": device.device_type},
                 f"configure {device.name}",
             )
             print(f"registered: {device.name} ({device.device_type}) {device.ip}")
@@ -594,6 +601,14 @@ class SmartWateringCliApp(SmartWateringService):
         )
         if operation_id is None:
             return
+        self.report_operation(operation_id)
+
+    def interactive_change_controller_id(self) -> None:
+        device = self.choose_device("Change MCU ID")
+        if device is None:
+            return
+        controller_id = self.prompt("New MCU ID", device.controller_name)
+        operation_id = self.queue_controller_name(device.name, controller_id)
         self.report_operation(operation_id)
 
     def interactive_show_status(self) -> None:
@@ -787,6 +802,7 @@ class SmartWateringCliApp(SmartWateringService):
             "21": self.interactive_drop_user,
             "22": self.interactive_sync_detected_watering_history,
             "23": self.interactive_hard_drop_detected_watering_history,
+            "24": self.interactive_change_controller_id,
         }
         while True:
             self.clear_interactive_screen()
@@ -837,6 +853,9 @@ class SmartWateringCliApp(SmartWateringService):
                     )
                     if operation_id is None:
                         return 0
+                    return 0 if self.report_operation(operation_id, wait=not args.no_wait) else 1
+                if args.device_command == "controller-id":
+                    operation_id = self.queue_controller_name(args.name, args.controller_id)
                     return 0 if self.report_operation(operation_id, wait=not args.no_wait) else 1
             if args.command == "status":
                 device = self.registry.get(args.device)

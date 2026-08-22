@@ -201,7 +201,7 @@ class BackgroundWorker:
             command.operation_id,
             {"base_url": command.base_url, "discovered_name": name, **settings},
         )
-        return name
+        return device.name
 
     def run(self) -> int:
         self.state.save_pid(os.getpid())

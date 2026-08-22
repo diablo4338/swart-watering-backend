@@ -162,6 +162,7 @@ class Device:
     device_type: str
     created_at: float
     updated_at: float
+    controller_name: str
 
 
 @dataclass

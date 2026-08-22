@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
 from smart_watering.domain import DeviceNameConflictError, SmartWateringError
+from smart_watering.infrastructure.database import DatabaseError
 
 from .errors import PublicApiError
 from .idempotency import IdempotencyMiddleware
@@ -47,6 +48,16 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
         return JSONResponse(
             status_code=409,
             content={"error": "device_name_conflict", "message": str(exc)},
+        )
+
+    @app.exception_handler(DatabaseError)
+    async def database_error(_request: Request, _exc: DatabaseError) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "database_unavailable",
+                "message": "database is temporarily unavailable",
+            },
         )
 
     @app.exception_handler(SmartWateringError)

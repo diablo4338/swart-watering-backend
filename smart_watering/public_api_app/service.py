@@ -66,7 +66,7 @@ class PublicApiService:
             response["target_g"] = target_g
         if isinstance(payload, dict):
             for key in (
-                "minutes", "weight_g", "device_type", "name", "dry_weight_g",
+                "minutes", "weight_g", "device_type", "name", "backend_name", "dry_weight_g",
                 "tare_weight_g", "wet_weight_g", "watering_loss_threshold_percent",
             ):
                 if key in payload:
@@ -282,6 +282,7 @@ class PublicApiService:
     def device_to_json(device: Any, pending_devices: set[str] | None = None) -> dict[str, Any]:
         return {
             "name": device.name,
+            "controller_name": device.controller_name,
             "type": device.device_type,
             "has_pending_operations": device.name in (pending_devices or set()),
         }

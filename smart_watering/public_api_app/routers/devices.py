@@ -43,6 +43,19 @@ def device_name_availability(
     }
 
 
+@router.put("/devices/{device_name}/backend-name")
+def update_backend_name(
+    device_name: str,
+    payload: dict[str, Any],
+    api: RuntimeDep,
+    _session: SessionDep,
+) -> dict[str, Any]:
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise PublicApiError("name must not be empty", 400, "invalid_device_name")
+    return api.service.device_to_json(api.business.registry.rename_backend(device_name, name))
+
+
 @router.get("/devices/{device_name}/watering-parameters")
 def watering_parameters(device_name: str, api: RuntimeDep, _session: SessionDep) -> dict[str, Any]:
     return {"device": device_name, **api.business.registry.watering_settings(device_name)}
@@ -272,7 +285,7 @@ def configure(
     _session: SessionDep,
 ) -> dict[str, Any]:
     allowed = {
-        "device_type", "name", "dry_weight_g", "tare_weight_g",
+        "backend_name", "device_type", "dry_weight_g", "tare_weight_g",
         "wet_weight_g", "watering_loss_threshold_percent",
     }
     config = {key: value for key, value in payload.items() if key in allowed}

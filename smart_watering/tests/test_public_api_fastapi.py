@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from fastapi.testclient import TestClient
 
 from smart_watering.application.service import SmartWateringService
+from smart_watering.infrastructure.database import DatabaseError
 from smart_watering.public_api_app import create_app
 from smart_watering.public_api_app.runtime import ApiRuntime, ApiSettings
 
@@ -94,6 +95,32 @@ def test_fastapi_health_and_auth_contract() -> None:
         assert devices.json() == {"devices": []}
 
 
+def test_database_errors_return_safe_service_unavailable_response() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        client, cli = make_client(temp_dir)
+        cli.auth.add_user("client", "secret-password")
+        token = client.post(
+            "/api/v2/auth/login",
+            json={"username": "client", "password": "secret-password"},
+        ).json()["token"]
+
+        def fail_session_lookup(_session_id: str) -> None:
+            raise DatabaseError("(sqlite3.OperationalError) database is locked; SELECT secret")
+
+        cli.auth.require_active_session = fail_session_lookup
+        response = client.get(
+            "/api/v2/devices",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 503
+        assert response.json() == {
+            "error": "database_unavailable",
+            "message": "database is temporarily unavailable",
+        }
+        assert "SELECT secret" not in response.text
+
+
 def test_fastapi_registers_documented_v2_routes() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         client, _cli = make_client(temp_dir)
@@ -121,8 +148,8 @@ def test_device_rename_to_existing_name_returns_conflict() -> None:
             json={"username": "client", "password": "secret-password"},
         ).json()["token"]
 
-        response = client.post(
-            "/api/v2/devices/plant_1/config",
+        response = client.put(
+            "/api/v2/devices/plant_1/backend-name",
             json={"name": "plant_2"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -162,6 +189,32 @@ def test_device_name_availability_allows_current_owner_and_rejects_other_device(
         assert own.json()["available"] is True
         assert occupied.json()["available"] is False
         assert free.json()["available"] is True
+
+
+def test_backend_name_update_returns_conflict_and_does_not_change_controller_name() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        client, cli = make_client(temp_dir)
+        cli.auth.add_user("client", "secret-password")
+        cli.registry.add("10.0.0.1", "plant", "fern")
+        cli.registry.add("10.0.0.2", "plant", "cactus")
+        token = client.post(
+            "/api/v2/auth/login",
+            json={"username": "client", "password": "secret-password"},
+        ).json()["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        conflict = client.put(
+            "/api/v2/devices/fern/backend-name", json={"name": "cactus"}, headers=headers
+        )
+        renamed = client.put(
+            "/api/v2/devices/fern/backend-name", json={"name": "office"}, headers=headers
+        )
+
+        assert conflict.status_code == 409
+        assert conflict.json()["error"] == "device_name_conflict"
+        assert renamed.status_code == 200
+        assert renamed.json()["name"] == "office"
+        assert renamed.json()["controller_name"] == "fern"
 
 
 def test_mutating_request_with_idempotency_key_replays_original_response() -> None:

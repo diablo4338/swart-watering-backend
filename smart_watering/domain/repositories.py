@@ -63,6 +63,16 @@ class DeviceRegistry:
         return f"{DeviceType.PLANT}_{index}"
 
     @staticmethod
+    def allocate_backend_name(session: Session, controller_name: str) -> str:
+        used = set(session.scalars(select(DeviceRecord.name)).all())
+        if controller_name not in used:
+            return controller_name
+        index = 1
+        while f"{controller_name}_{index}" in used:
+            index += 1
+        return f"{controller_name}_{index}"
+
+    @staticmethod
     def demote_other_tanks(session: Session, tank_name: str, updated_at: float) -> None:
         rows = session.scalars(
             select(DeviceRecord).where(
@@ -80,18 +90,21 @@ class DeviceRegistry:
 
         ip, base_url = self.normalize_base_url(ip_or_url)
         now = time.time()
-        device_name = name or self.next_name(device_type)
+        controller_name = name or self.next_name(device_type)
 
         with self.store.session() as session:
-            existing = session.scalar(select(DeviceRecord).where(DeviceRecord.name == device_name))
-            if existing is not None and device_type == DeviceType.TANK:
-                return Device(existing.id, existing.name, existing.ip, existing.base_url, device_type, existing.created_at, now)
+            existing = session.scalar(select(DeviceRecord).where(
+                DeviceRecord.base_url == base_url,
+                DeviceRecord.controller_name == controller_name,
+            ))
             if existing is not None:
-                raise DeviceNameConflictError(f"device name already exists: {device_name}")
+                return self.get(existing.name)
+            device_name = self.allocate_backend_name(session, controller_name)
 
             session.add(
                 DeviceRecord(
                     name=device_name,
+                    controller_name=controller_name,
                     ip=ip,
                     base_url=base_url,
                     device_type=DeviceType.PLANT,
@@ -112,13 +125,18 @@ class DeviceRegistry:
         ip, base_url = self.normalize_base_url(ip_or_url)
         now = time.time()
         with self.store.session() as session:
-            existing = session.scalar(select(DeviceRecord).where(DeviceRecord.name == name))
+            existing = session.scalar(select(DeviceRecord).where(
+                DeviceRecord.base_url == base_url,
+                DeviceRecord.controller_name == name,
+            ))
+            backend_name = existing.name if existing is not None else self.allocate_backend_name(session, name)
             if device_type == DeviceType.TANK:
-                self.demote_other_tanks(session, name, now)
+                self.demote_other_tanks(session, backend_name, now)
             if existing is None:
                 session.add(
                     DeviceRecord(
-                        name=name,
+                        name=backend_name,
+                        controller_name=name,
                         ip=ip,
                         base_url=base_url,
                         device_type=device_type,
@@ -134,11 +152,17 @@ class DeviceRegistry:
                 existing.updated_at = now
                 created_at = existing.created_at
 
-        return self.get(name)
+        return self.get(backend_name)
 
     def validate_config_update(self, current_name: str, config: dict[str, Any]) -> Device:
         device = self.get(current_name)
-        new_name = str(config.get("name", device.name))
+        if "name" in config:
+            raise SmartWateringError(
+                "name is not a controller config field; use backend-name or controller-id"
+            )
+        new_name = str(config.get("backend_name", device.name)).strip()
+        if not new_name:
+            raise SmartWateringError("device name must not be empty")
         new_type = str(config.get("device_type", device.device_type))
 
         if new_type not in DEVICE_TYPES:
@@ -148,11 +172,17 @@ class DeviceRegistry:
             if new_name != current_name and session.scalar(select(DeviceRecord).where(DeviceRecord.name == new_name)) is not None:
                 raise DeviceNameConflictError(f"device name already exists: {new_name}")
 
-        return Device(device.id, new_name, device.ip, device.base_url, new_type, device.created_at, time.time())
+        controller_name = device.controller_name
+        return Device(
+            device.id, new_name, device.ip, device.base_url, new_type,
+            device.created_at, time.time(), controller_name,
+        )
 
     def apply_confirmed_config(self, current_name: str, config: dict[str, Any]) -> Device:
         device = self.get(current_name)
-        new_name = str(config.get("name", device.name))
+        new_name = str(config.get("backend_name", device.name)).strip()
+        if not new_name:
+            raise SmartWateringError("device name must not be empty")
         new_type = str(config.get("device_type", device.device_type))
 
         if new_type not in DEVICE_TYPES:
@@ -160,18 +190,15 @@ class DeviceRegistry:
 
         now = time.time()
         with self.store.session() as session:
-            if new_name != current_name and session.scalar(select(DeviceRecord).where(DeviceRecord.name == new_name)) is not None:
-                raise DeviceNameConflictError(f"device name already exists: {new_name}")
-
             if new_type == DeviceType.TANK:
                 self.demote_other_tanks(session, new_name, now)
 
             updated = session.get(DeviceRecord, device.id)
             if updated is None:
                 raise SmartWateringError(f"unknown device: {current_name}")
-            updated.name = new_name
             updated.ip = device.ip
             updated.base_url = device.base_url
+            updated.name = new_name
             updated.device_type = new_type
             updated.updated_at = now
             try:
@@ -181,13 +208,19 @@ class DeviceRegistry:
                     f"device name already exists: {new_name}"
                 ) from exc
 
-        return Device(device.id, new_name, device.ip, device.base_url, new_type, device.created_at, now)
+        return Device(
+            device.id, new_name, device.ip, device.base_url, new_type,
+            device.created_at, now, device.controller_name,
+        )
 
     def list(self) -> list[Device]:
         with self.store.session() as session:
             rows = session.scalars(select(DeviceRecord).order_by(DeviceRecord.device_type, DeviceRecord.name)).all()
         return [
-            Device(row.id, row.name, row.ip, row.base_url, row.device_type, row.created_at, row.updated_at)
+            Device(
+                row.id, row.name, row.ip, row.base_url, row.device_type,
+                row.created_at, row.updated_at, row.controller_name,
+            )
             for row in rows
         ]
 
@@ -198,7 +231,10 @@ class DeviceRegistry:
         if row is None:
             raise SmartWateringError(f"unknown device: {name}")
 
-        return Device(row.id, row.name, row.ip, row.base_url, row.device_type, row.created_at, row.updated_at)
+        return Device(
+            row.id, row.name, row.ip, row.base_url, row.device_type,
+            row.created_at, row.updated_at, row.controller_name,
+        )
 
     def is_name_available(self, name: str, current_name: str | None = None) -> bool:
         candidate = name.strip()
@@ -216,6 +252,39 @@ class DeviceRegistry:
                 select(DeviceRecord.id).where(DeviceRecord.name == current_name)
             )
             return current_id is not None and owner_id == current_id
+
+    def rename_backend(self, current_name: str, new_name: str) -> Device:
+        candidate = new_name.strip()
+        if not candidate:
+            raise SmartWateringError("device name must not be empty")
+        device = self.get(current_name)
+        if candidate == current_name:
+            return device
+        now = time.time()
+        with self.store.session() as session:
+            if session.scalar(select(DeviceRecord.id).where(DeviceRecord.name == candidate)) is not None:
+                raise DeviceNameConflictError(f"device name already exists: {candidate}")
+            row = session.get(DeviceRecord, device.id)
+            if row is None:
+                raise SmartWateringError(f"unknown device: {current_name}")
+            row.name = candidate
+            row.updated_at = now
+            try:
+                session.flush()
+            except IntegrityError as exc:
+                raise DeviceNameConflictError(f"device name already exists: {candidate}") from exc
+        return self.get(candidate)
+
+    def confirm_controller_name(self, backend_name: str, controller_name: str) -> Device:
+        device = self.get(backend_name)
+        now = time.time()
+        with self.store.session() as session:
+            row = session.get(DeviceRecord, device.id)
+            if row is None:
+                raise SmartWateringError(f"unknown device: {backend_name}")
+            row.controller_name = controller_name
+            row.updated_at = now
+        return self.get(backend_name)
 
     def remove(self, name: str) -> None:
         with self.store.session() as session:
@@ -765,6 +834,17 @@ class OperationLog:
                     f"confirmed config apply skipped operation_id={operation_id} "
                     f"device={device_name} reason={exc}"
                 )
+        elif operation_type == "controller_name" and status == OP_SUCCESS:
+            try:
+                payload = json.loads(payload_json or "{}")
+                controller_name = payload.get("name") if isinstance(payload, dict) else None
+                if isinstance(controller_name, str):
+                    DeviceRegistry(self.store).confirm_controller_name(device_name, controller_name)
+            except (json.JSONDecodeError, SmartWateringError) as exc:
+                self.log(
+                    f"controller name apply skipped operation_id={operation_id} "
+                    f"device={device_name} reason={exc}"
+                )
         elif operation_type == "device_status" and status == OP_SUCCESS:
             try:
                 result = json.loads(row.result_json or "{}")
@@ -932,6 +1012,7 @@ class OperationLog:
             "fill": "watering_start",
             "stop": "watering_stop",
             "config": "device_config",
+            "controller_name": "controller_name",
             "watering_start": "watering_start",
             "watering_stop": "watering_stop",
             "sleep_enable": "sleep_enable",

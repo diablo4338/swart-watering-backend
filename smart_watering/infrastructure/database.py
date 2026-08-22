@@ -8,7 +8,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import (
     CheckConstraint, Float, ForeignKey, Index, Integer, String, UniqueConstraint, func,
-    create_engine, select,
+    create_engine, event, select,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
@@ -30,6 +30,7 @@ class DeviceRecord(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
+    controller_name: Mapped[str] = mapped_column(String, nullable=False)
     ip: Mapped[str] = mapped_column(String, nullable=False)
     base_url: Mapped[str] = mapped_column(String, nullable=False)
     device_type: Mapped[str] = mapped_column(String, nullable=False)
@@ -232,13 +233,23 @@ class DatabaseStore:
             try:
                 self._engine = create_engine(
                     f"sqlite:///{self.db_path}",
-                    connect_args={"check_same_thread": False},
+                    connect_args={"check_same_thread": False, "timeout": 30},
                     poolclass=NullPool,
                     future=True,
                 )
+                event.listen(self._engine, "connect", self._configure_sqlite_connection)
             except SQLAlchemyError as exc:
                 raise DatabaseError(f"cannot open database {self.db_path}: {exc}") from exc
         return self._engine
+
+    @staticmethod
+    def _configure_sqlite_connection(dbapi_connection: Any, _connection_record: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA journal_mode=WAL")
+        finally:
+            cursor.close()
 
     @property
     def session_factory(self) -> sessionmaker[Session]:

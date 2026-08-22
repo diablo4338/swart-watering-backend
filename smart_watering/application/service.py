@@ -111,8 +111,10 @@ class SmartWateringService:
         self.registry.validate_config_update(device.name, config)
         payload = {
             "device_type": config.get("device_type", device.device_type),
-            "name": config.get("name", device.name),
+            "name": config.get("name", device.controller_name),
         }
+        if "backend_name" in config:
+            payload["backend_name"] = config["backend_name"]
         payload.update({key: config[key] for key in CONFIG_FLOAT_KEYS if key in config})
         duplicate = self.queue.find_duplicate(device.base_url, "/config", "POST", payload)
         if duplicate is not None:
@@ -130,11 +132,19 @@ class SmartWateringService:
             return None
         return self._enqueue(device, "config", "/config", payload, description)
 
+    def queue_controller_name(self, device_name: str, controller_name: str) -> str:
+        device = self.registry.get(device_name)
+        payload = {"device_type": device.device_type, "name": controller_name}
+        return self._enqueue(
+            device, "controller_name", "/config", payload,
+            f"change controller id for {device.name}",
+        )
+
     def queue_device_config_if_not_confirmed(self, device: Device) -> None:
         latest = self.operations.latest_for_device(device.name, "config")
         if latest is not None and latest["status"] != OP_SUCCESS:
             self.queue_device_config(
-                device, {"device_type": device.device_type, "name": device.name},
+                device, {"device_type": device.device_type},
                 f"confirm {device.name} config",
             )
 
