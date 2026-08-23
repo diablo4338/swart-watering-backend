@@ -39,6 +39,9 @@ MAX_SLEEP_INTERVAL_MIN = 50
 CLI_OPERATION_WAIT_TIMEOUT_SEC = 900
 CLI_OPERATION_WAIT_TIMEOUT_SEC_ENV = "SMART_WATERING_CLI_OPERATION_WAIT_TIMEOUT_SEC"
 CLI_OPERATION_POLL_INTERVAL_SEC = 0.5
+CALLBACK_CHECK_TIMEOUT_SEC = 60 * 60
+CALLBACK_CHECK_DEVICE_WAIT_SEC = 5.0
+CALLBACK_CHECK_POLL_INTERVAL_SEC = 0.1
 
 
 def resolve_cli_operation_wait_timeout_sec() -> int:
@@ -93,6 +96,9 @@ class SmartWateringCliApp(SmartWateringService):
         self.interactive_message_delay_sec = 2.0
         self.operation_wait_timeout_sec = resolve_cli_operation_wait_timeout_sec()
         self.operation_poll_interval_sec = CLI_OPERATION_POLL_INTERVAL_SEC
+        self.callback_check_timeout_sec = CALLBACK_CHECK_TIMEOUT_SEC
+        self.callback_check_device_wait_sec = CALLBACK_CHECK_DEVICE_WAIT_SEC
+        self.callback_check_poll_interval_sec = CALLBACK_CHECK_POLL_INTERVAL_SEC
 
     @staticmethod
     def format_status(payload: dict[str, Any]) -> str:
@@ -724,6 +730,154 @@ class SmartWateringCliApp(SmartWateringService):
         operation_id = self.queue_controller_name(device.name, controller_id)
         self.report_operation(operation_id)
 
+    def _first_received_callback(
+        self, probes: dict[str, Device],
+    ) -> tuple[str, Device, dict[str, Any]] | None:
+        received: list[tuple[float, str, Device, dict[str, Any]]] = []
+        for operation_id, device in probes.items():
+            for event in self.operations.events(operation_id):
+                if event["event_type"] == "callback.received":
+                    received.append((event["created_at"], operation_id, device, event))
+                    break
+        if not received:
+            return None
+        _created_at, operation_id, device, event = min(received, key=lambda item: item[0])
+        return operation_id, device, event
+
+    def interactive_check_callback(self) -> None:
+        devices = self.registry.list()
+        if not devices:
+            raise SmartWateringError("no registered devices")
+
+        started_at = time.monotonic()
+        deadline = started_at + self.callback_check_timeout_sec
+        probes: dict[str, Device] = {}
+        probe_ids_by_device: dict[str, str] = {}
+        attempt = 0
+        print(f"callback URL: {self.callback_url()}")
+        print(
+            f"checking {len(devices)} device(s) for up to "
+            f"{self.callback_check_timeout_sec:.0f}s"
+        )
+
+        while time.monotonic() < deadline:
+            for registered_device in devices:
+                if time.monotonic() >= deadline:
+                    break
+                attempt += 1
+                # Resolve the record again on every pass, then use this exact
+                # device's URL for both the read and the no-op config write.
+                device = self.registry.get(registered_device.name)
+                print(
+                    f"probe {attempt}: backend={device.name} "
+                    f"MCU_ID={device.controller_name} address={device.base_url}"
+                )
+                operation_id: str | None = None
+                device_deadline = min(
+                    deadline,
+                    time.monotonic() + self.callback_check_device_wait_sec,
+                )
+                previous_api_timeout = getattr(self.api, "timeout_sec", None)
+                try:
+                    if previous_api_timeout is not None:
+                        self.api.timeout_sec = max(
+                            0.1,
+                            min(previous_api_timeout, device_deadline - time.monotonic()),
+                        )
+                    status = self.api.request_json(device.base_url, "/watering", "GET")
+                    status_device = status.get("device") if isinstance(status, dict) else None
+                    actual_type = status_device.get("type") if isinstance(status_device, dict) else None
+                    actual_mcu_id = status_device.get("name") if isinstance(status_device, dict) else None
+                    if actual_type not in DEVICE_TYPES:
+                        raise SmartWateringError(
+                            f"controller returned unsupported device type: {actual_type}"
+                        )
+                    if time.monotonic() >= device_deadline:
+                        raise RetryableDeviceApiError("device probe window expired after status read")
+
+                    operation_id = probe_ids_by_device.get(device.id)
+                    if operation_id is None:
+                        operation_id = self.operations.create(
+                            device.name,
+                            "callback_probe",
+                            {"device_type": actual_type},
+                        )
+                        probe_ids_by_device[device.id] = operation_id
+                        probes[operation_id] = device
+                    payload = self.build_operation_payload(
+                        operation_id,
+                        {"device_type": actual_type},
+                    )
+                    self.operations.update_payload(operation_id, payload)
+                    if previous_api_timeout is not None:
+                        self.api.timeout_sec = max(
+                            0.1,
+                            min(previous_api_timeout, device_deadline - time.monotonic()),
+                        )
+                    response = self.api.request_json(device.base_url, "/config", "POST", payload)
+                    self.operations.update_result(operation_id, response)
+                    self.operations.event(
+                        operation_id,
+                        "accepted",
+                        "callback probe accepted by controller",
+                        source="controller",
+                        event_type="command.accepted",
+                    )
+                    print(
+                        f"  request accepted: actual_MCU_ID={actual_mcu_id} "
+                        f"device_type={actual_type}; waiting for callback"
+                    )
+                except SmartWateringError as exc:
+                    print(f"  request failed: {exc}")
+                finally:
+                    if previous_api_timeout is not None:
+                        self.api.timeout_sec = previous_api_timeout
+
+                wait_deadline = device_deadline
+                while True:
+                    received = self._first_received_callback(probes)
+                    if received is not None:
+                        received_operation_id, received_device, event = received
+                        data = event.get("data") or {}
+                        elapsed = time.monotonic() - started_at
+                        print("callback check: SUCCESS")
+                        print(
+                            f"device: backend={received_device.name} "
+                            f"MCU_ID={received_device.controller_name}"
+                        )
+                        print(f"operation_id: {received_operation_id}")
+                        print(f"callback status: {data.get('status', 'unknown')}")
+                        print(f"elapsed: {elapsed:.1f}s")
+                        return
+                    if time.monotonic() >= wait_deadline:
+                        break
+                    time.sleep(self.callback_check_poll_interval_sec)
+
+                if operation_id is not None:
+                    self.operations.trace_event(
+                        operation_id,
+                        "cli",
+                        "callback_probe.no_callback",
+                        f"callback was not received within {self.callback_check_device_wait_sec:g}s",
+                        {"attempt": attempt},
+                    )
+                print("  no callback; trying next device")
+
+        for operation_id in probes:
+            operation = self.operations.get(operation_id)
+            if operation is not None and operation["status"] not in OP_TERMINAL_STATUSES:
+                self.operations.event(
+                    operation_id,
+                    OP_TIMEOUT,
+                    f"callback check timed out after {self.callback_check_timeout_sec:.0f}s",
+                    source="cli",
+                    event_type="operation.timed_out",
+                )
+        print(
+            "callback check: TIMEOUT - no controller callback received within "
+            f"{self.callback_check_timeout_sec:.0f}s"
+        )
+
     def interactive_show_status(self) -> None:
         device = self.choose_device("Show status for")
         if device is not None:
@@ -954,6 +1108,7 @@ class SmartWateringCliApp(SmartWateringService):
             ]),
             "6": ("Callback", [
                 ("1", "Show callback URL", lambda: print(self.callback_url())),
+                ("2", "Check callback", self.interactive_check_callback),
             ]),
             "7": ("Users", [
                 ("1", "Add API user", self.interactive_add_user),

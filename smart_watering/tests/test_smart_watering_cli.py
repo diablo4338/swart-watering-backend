@@ -1736,6 +1736,67 @@ def test_interactive_change_controller_id_queues_command(monkeypatch) -> None:
         assert reported == [command.operation_id]
 
 
+def test_interactive_callback_check_targets_each_device_with_its_actual_type(capsys) -> None:
+    class ProbeApi:
+        def __init__(self) -> None:
+            self.app = None
+            self.posts: list[tuple[str, dict]] = []
+
+        def request_json(self, base_url, path, method, payload=None):
+            actual = {
+                "http://192.168.1.10": ("external_plant_id", "plant"),
+                "http://192.168.1.11": ("external_tank_id", "tank"),
+            }[base_url]
+            if method == "GET":
+                return {"device": {"name": actual[0], "type": actual[1]}}
+            assert path == "/config"
+            self.posts.append((base_url, dict(payload)))
+            if base_url == "http://192.168.1.11":
+                operation_id = payload["operation_id"]
+                self.app.operations.trace_event(
+                    operation_id,
+                    "callback",
+                    "callback.received",
+                    "controller callback received",
+                    {"operation_id": operation_id, "status": "success"},
+                )
+                self.app.operations.event(
+                    operation_id,
+                    "success",
+                    "config_updated",
+                    source="callback",
+                    event_type="operation.succeeded",
+                )
+            return {"status": "config_updated"}
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.registry.add("192.168.1.10", "plant", "plant_backend")
+        app.registry.add("192.168.1.11", "tank", "tank_backend")
+        api = ProbeApi()
+        api.app = app
+        app.api = api
+        app.callback_check_timeout_sec = 1
+        app.callback_check_device_wait_sec = 0.01
+        app.callback_check_poll_interval_sec = 0.001
+
+        app.interactive_check_callback()
+
+        assert [base_url for base_url, _payload in api.posts] == [
+            "http://192.168.1.10",
+            "http://192.168.1.11",
+        ]
+        assert [payload["device_type"] for _base_url, payload in api.posts] == [
+            "plant",
+            "tank",
+        ]
+        assert all("name" not in payload for _base_url, payload in api.posts)
+        assert all("operation_id" in payload for _base_url, payload in api.posts)
+        assert all("callback_url" in payload for _base_url, payload in api.posts)
+        output = capsys.readouterr().out
+        assert "callback check: SUCCESS" in output
+        assert "device: backend=tank_backend" in output
+
 def test_interactive_can_sync_detected_watering_history(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
