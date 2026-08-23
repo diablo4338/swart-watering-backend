@@ -316,6 +316,7 @@ POST /api/v2/devices/<device>/watering/stop   {}
 GET  /api/v2/devices/<device>/operations
 GET  /api/v2/operations/<operation_id>
 GET  /api/v2/operations/<operation_id>/events
+GET  /api/v2/operations/<operation_id>/trace
 ```
 
 Smoke-test watering through the public API:

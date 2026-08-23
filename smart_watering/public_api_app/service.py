@@ -94,10 +94,42 @@ class PublicApiService:
         return {
             "operation_id": operation_id,
             "events": [
-                {"status": event["status"], "message": event["detail"]}
+                {
+                    "id": event["id"],
+                    "status": event["status"],
+                    "message": event["detail"],
+                    "source": event["source"],
+                    "event_type": event["event_type"],
+                    "data": event["data"],
+                    "created_at": event["created_at"],
+                }
                 for event in self.app.operations.events(operation_id)
             ],
         }
+
+    def operation_trace_response(self, operation_id: str) -> dict[str, Any]:
+        operation = self.app.operations.detail(operation_id)
+        if operation is None:
+            raise PublicApiError(
+                f"operation '{operation_id}' does not exist", 404, "operation_not_found",
+            )
+        return self.trace_safe({
+            "operation": operation,
+            "events": self.app.operations.events(operation_id),
+            "related_operations": self.app.operations.related(operation_id),
+        })
+
+    @staticmethod
+    def trace_safe(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: ("<redacted>" if key.lower() in {"callback_url", "authorization", "token"}
+                      else PublicApiService.trace_safe(item))
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [PublicApiService.trace_safe(item) for item in value]
+        return value
 
     def planned_watering_response(self, device_name: str) -> dict[str, Any] | None:
         operation = self.app.operations.latest_non_terminal_watering_start(device_name)

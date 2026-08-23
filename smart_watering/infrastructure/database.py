@@ -56,6 +56,10 @@ class OperationRecord(Base):
     __tablename__ = "operations"
 
     operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    correlation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    causation_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("operations.operation_id", ondelete="SET NULL"), nullable=True,
+    )
     device_id: Mapped[str] = mapped_column(
         String, ForeignKey("devices.id", ondelete="RESTRICT"), nullable=True, index=True,
     )
@@ -82,6 +86,9 @@ class OperationEventRecord(Base):
     )
     status: Mapped[str] = mapped_column(String, nullable=False)
     detail: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False, default="backend")
+    event_type: Mapped[str] = mapped_column(String, nullable=False, default="operation.status_changed")
+    data_json: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 

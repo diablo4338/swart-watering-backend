@@ -1413,12 +1413,13 @@ def test_stop_when_watering_is_not_active_is_idempotent_success() -> None:
         assert app.queue.list() == []
         assert app.operations.get(stop_operation_id)["status"] == "success"
         events = app.operations.events(stop_operation_id)
-        assert [event["status"] for event in events] == [
+        status_events = [event for event in events if app.operations.is_status_event(event)]
+        assert [event["status"] for event in status_events] == [
             "queued",
             "sending",
             "success",
         ]
-        assert events[-1]["detail"] == "no active watering"
+        assert status_events[-1]["detail"] == "no active watering"
 
 
 def test_watering_start_firmware_failure_is_terminal_error() -> None:
@@ -1478,7 +1479,7 @@ def test_sleep_disable_retries_until_controller_wakes() -> None:
         assert api.requests == 2
         assert app.queue.list() == []
         assert app.operations.get(operation_id)["status"] == "accepted"
-        assert [event["status"] for event in app.operations.events(operation_id)] == [
+        assert [event["status"] for event in app.operations.events(operation_id) if app.operations.is_status_event(event)] == [
             "queued",
             "sending",
             "accepted",
@@ -1518,7 +1519,7 @@ def test_sleep_interval_retries_until_controller_wakes() -> None:
         assert api.requests == 2
         assert app.queue.list() == []
         assert app.operations.get(operation_id)["status"] == "accepted"
-        assert [event["status"] for event in app.operations.events(operation_id)] == [
+        assert [event["status"] for event in app.operations.events(operation_id) if app.operations.is_status_event(event)] == [
             "queued",
             "sending",
             "accepted",
@@ -1557,7 +1558,7 @@ def test_worker_stores_device_status_result() -> None:
         assert operation["result"]["device"]["name"] == "plant_1"
         assert operation["result"]["config"]["sleep_interval_min"] == 20
         assert isinstance(operation["result_received_at"], float)
-        assert [event["status"] for event in app.operations.events(operation_id)] == ["queued", "sending", "success"]
+        assert [event["status"] for event in app.operations.events(operation_id) if app.operations.is_status_event(event)] == ["queued", "sending", "success"]
 
 
 def test_operation_status_does_not_regress_after_terminal_event() -> None:
@@ -1570,7 +1571,7 @@ def test_operation_status_does_not_regress_after_terminal_event() -> None:
         operations.event(operation_id, "accepted", "late accepted response")
 
         assert operations.get(operation_id)["status"] == "success"
-        assert [event["status"] for event in operations.events(operation_id)] == ["queued", "sending", "success"]
+        assert [event["status"] for event in operations.events(operation_id) if operations.is_status_event(event)] == ["queued", "sending", "success"]
 
 
 def test_format_status_includes_device_type_and_dry_weight() -> None:
@@ -1630,19 +1631,49 @@ def test_interactive_menu_can_exit(monkeypatch) -> None:
         menu = app.format_main_menu()
         assert "Devices" in menu
         assert "Watering" in menu
-        assert "7. Show device constants" in menu
-        assert "8. Start watering" in menu
-        assert "9. Stop watering" in menu
-        assert "10. Enable sleep" in menu
-        assert "12. Set sleep interval" in menu
-        assert "13. Set zero" in menu
-        assert "14. Calibrate scale" in menu
-        assert "24. Change MCU ID" in menu
-        assert "16. Clear device queue" in menu
-        assert "19. Add API user" in menu
-        assert "21. Drop API user" in menu
-        assert "22. Sync detected watering history" in menu
-        assert "23. Hard drop detected watering history" in menu
+        assert "1. Devices" in menu
+        assert "5. Operations" in menu
+        assert "8. Statistics" in menu
+        operations_menu = app.format_submenu("Operations", [
+            ("1", "Show pending queue", None),
+            ("2", "Clear device queue", None),
+            ("3", "Show recent operations", None),
+            ("4", "Trace operation", None),
+        ])
+        assert "4. Trace operation" in operations_menu
+        assert "0. Back" in operations_menu
+
+
+def test_interactive_devices_submenu_runs_add_as_first_action(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        calls: list[str] = []
+        monkeypatch.setattr(app, "interactive_register_device", lambda: calls.append("add"))
+        answers = iter(["1", "1", "", "0", "0"])
+        monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+        assert app.run_interactive() == 0
+        assert calls == ["add"]
+
+
+def test_interactive_trace_operation_prints_structured_timeline(monkeypatch, capsys) -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.registry.add("192.168.1.10", "plant", "plant_1")
+        operation_id = app.operations.create("plant_1", "device_status", {})
+        app.operations.trace_event(
+            operation_id, "worker", "command.picked", "worker picked operation",
+            {"path": "/watering"},
+        )
+        monkeypatch.setattr(app, "prompt", lambda label, default=None: operation_id)
+        capsys.readouterr()
+
+        app.interactive_trace_operation()
+
+        output = capsys.readouterr().out
+        assert f"operation: {operation_id}" in output
+        assert "command.picked" in output
+        assert '"path": "/watering"' in output
 
 
 def test_interactive_change_controller_id_queues_command(monkeypatch) -> None:
@@ -1676,7 +1707,7 @@ def test_interactive_can_sync_detected_watering_history(monkeypatch) -> None:
             "sync_detected_watering_history",
             lambda days, device_name=None: calls.append((days, device_name)),
         )
-        answers = iter(["22", "30", "", "", "0"])
+        answers = iter(["8", "1", "30", "", "", "0", "0"])
         monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
         assert app.run_interactive() == 0
@@ -1695,7 +1726,7 @@ def test_interactive_can_hard_drop_all_detected_watering_history(
             "hard_drop_detected_watering_history",
             lambda device_name=None: calls.append(device_name),
         )
-        answers = iter(["23", "", "DROP ALL", "", "0"])
+        answers = iter(["8", "2", "", "DROP ALL", "", "0", "0"])
         monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
         assert app.run_interactive() == 0
@@ -1716,7 +1747,7 @@ def test_interactive_can_show_constants(monkeypatch, capsys) -> None:
         app.interactive_message_delay_sec = 0
         app.registry.add("192.168.1.10", "plant", "plant_1")
         app.api = FakeConstantsApi()
-        answers = iter(["7", "1", "", "0"])
+        answers = iter(["2", "3", "1", "", "0", "0"])
         monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
         assert app.run_interactive() == 0
@@ -2035,7 +2066,7 @@ def test_interactive_device_action_reports_missing_devices(monkeypatch, capsys) 
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         app.interactive_message_delay_sec = 0
-        answers = iter(["5", "0"])
+        answers = iter(["2", "1", "0", "0"])
         monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
         assert app.run_interactive() == 0
@@ -2081,8 +2112,9 @@ def test_worker_records_all_failed_send_stages() -> None:
         assert worker.run() == 0
 
         events = operations.events(operation_id)
-        assert [event["status"] for event in events] == ["queued", "sending", "timeout"]
-        assert "device did not respond" in events[-1]["detail"]
+        status_events = [event for event in events if operations.is_status_event(event)]
+        assert [event["status"] for event in status_events] == ["queued", "sending", "timeout"]
+        assert "device did not respond" in status_events[-1]["detail"]
         assert operations.get(operation_id)["status"] == "timeout"
         assert queue.list() == []
         assert api.attempts == 1
@@ -2212,7 +2244,7 @@ def test_retryable_watering_start_moves_behind_same_device_queue() -> None:
         assert api.paths[:2] == ["/watering/start", "/config"]
         assert operations.get(config_operation_id)["status"] == "accepted"
         assert operations.get(start_operation_id)["status"] == "timeout"
-        assert [event["status"] for event in operations.events(start_operation_id)] == [
+        assert [event["status"] for event in operations.events(start_operation_id) if operations.is_status_event(event)] == [
             "queued",
             "sending",
             "timeout",
@@ -2248,8 +2280,9 @@ def test_worker_records_invalid_device_url_as_operation_error() -> None:
         assert worker.run() == 0
 
         events = operations.events(operation_id)
-        assert [event["status"] for event in events] == ["queued", "sending", "error"]
-        assert "invalid URL" in events[-1]["detail"]
+        status_events = [event for event in events if operations.is_status_event(event)]
+        assert [event["status"] for event in status_events] == ["queued", "sending", "error"]
+        assert "invalid URL" in status_events[-1]["detail"]
         assert queue.list() == []
 
 
@@ -2361,7 +2394,7 @@ def test_worker_does_not_mark_success_without_callback() -> None:
         assert worker.run() == 0
 
         events = operations.events(operation_id)
-        assert [event["status"] for event in events] == ["queued", "sending", "accepted"]
+        assert [event["status"] for event in events if operations.is_status_event(event)] == ["queued", "sending", "accepted"]
         assert queue.list() == []
         assert operations.list_recent(1)[0]["status"] == "accepted"
 
@@ -2405,7 +2438,7 @@ def test_worker_retries_config_command_after_retryable_error() -> None:
         assert worker.run() == 0
 
         assert api.calls == 2
-        assert [event["status"] for event in operations.events(operation_id)] == ["queued", "sending", "accepted"]
+        assert [event["status"] for event in operations.events(operation_id) if operations.is_status_event(event)] == ["queued", "sending", "accepted"]
         assert queue.list() == []
 
 
@@ -2445,8 +2478,9 @@ def test_worker_supervisor_times_out_accepted_operation_without_callback() -> No
         supervisor.start_pending_workers()
 
         events = operations.events(operation_id)
-        assert [event["status"] for event in events] == ["queued", "sending", "accepted", "timeout"]
-        assert "controller result was not received within 0s" in events[-1]["detail"]
+        status_events = [event for event in events if operations.is_status_event(event)]
+        assert [event["status"] for event in status_events] == ["queued", "sending", "accepted", "timeout"]
+        assert "controller result was not received within 0s" in status_events[-1]["detail"]
         assert operations.get(operation_id)["status"] == "timeout"
 
 
@@ -2512,6 +2546,47 @@ def test_callback_log_includes_operation_context(capsys) -> None:
     assert "operation_type=fill" in output
     assert "status=error" in output
     assert 'detail="pump start failed"' in output
+
+
+def test_operation_trace_contains_structured_events_and_redacts_callback_url(capsys) -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.registry.add("192.168.1.10", "plant", "plant_1")
+        operation_id = app.operations.create(
+            "plant_1", "config", {"callback_url": "http://secret/callback", "dry_weight_g": 120}
+        )
+        app.operations.trace_event(
+            operation_id, "worker", "command.picked", "worker picked operation",
+            {"path": "/config"},
+        )
+
+        capsys.readouterr()
+        assert app.run(["trace", operation_id, "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["operation"]["payload"]["callback_url"] == "<redacted>"
+        assert payload["events"][-1]["source"] == "worker"
+        assert payload["events"][-1]["event_type"] == "command.picked"
+        assert payload["events"][-1]["data"]["path"] == "/config"
+
+
+def test_watering_stop_is_correlated_with_cancelled_start() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        add_confirmed_tank(app)
+        start_id = app.queue_fill("main_tank", 100)
+
+        stop_id = app.queue_stop("main_tank")
+
+        start = app.operations.get(start_id)
+        stop = app.operations.get(stop_id)
+        assert stop["correlation_id"] == start["correlation_id"]
+        assert stop["causation_id"] == start_id
+        assert [row["operation_id"] for row in app.operations.related(start_id)] == [stop_id]
+        related_event = next(
+            event for event in app.operations.events(start_id)
+            if event["event_type"] == "operation.related"
+        )
+        assert related_event["data"]["related_operation_id"] == stop_id
 
 
 def test_callback_healthz_logs_access(capsys) -> None:

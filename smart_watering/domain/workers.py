@@ -241,7 +241,11 @@ class BackgroundWorker:
                 active_started_at = command.started_at or now
                 self.queue.mark_started(command.id)
                 if command.started_at is None:
-                    self.operations.event(command.operation_id, OP_SENDING, "worker picked operation")
+                    self.operations.event(
+                        command.operation_id, OP_SENDING, "worker picked operation",
+                        source="worker", event_type="command.picked",
+                        data={"queue_id": command.id, "method": command.method, "path": command.path},
+                    )
                 self._was_idle = False
                 self.log(
                     "processing "
@@ -268,7 +272,10 @@ class BackgroundWorker:
                         continue
                     discovered_name = self._complete_discovery(command, response)
                     self.operations.update_result(command.operation_id, response)
-                    self.operations.event(command.operation_id, OP_SUCCESS, f"device discovered: {discovered_name}")
+                    self.operations.event(
+                        command.operation_id, OP_SUCCESS, f"device discovered: {discovered_name}",
+                        source="worker", event_type="operation.succeeded",
+                    )
                     self.queue.pop(command.id)
                     self.log(
                         f"discovered id={command.id} operation_id={command.operation_id} "
@@ -280,13 +287,19 @@ class BackgroundWorker:
                     continue
                 if command.method == "GET" and command.path == "/watering":
                     self.operations.update_result(command.operation_id, response)
-                    self.operations.event(command.operation_id, OP_SUCCESS, "status fetched")
+                    self.operations.event(
+                        command.operation_id, OP_SUCCESS, "status fetched",
+                        source="worker", event_type="operation.succeeded",
+                    )
                     self.queue.pop(command.id)
                     self.log(f"fetched id={command.id} operation_id={command.operation_id}", command.device_name)
                     active_command_id = None
                     active_started_at = 0.0
                     continue
-                self.operations.event(command.operation_id, OP_ACCEPTED, "device accepted command")
+                self.operations.event(
+                    command.operation_id, OP_ACCEPTED, "device accepted command",
+                    source="controller", event_type="command.accepted",
+                )
                 self.queue.pop(command.id)
                 self.log(f"sent id={command.id} operation_id={command.operation_id}", command.device_name)
                 active_command_id = None

@@ -174,6 +174,105 @@ class SmartWateringCliApp(SmartWateringService):
         ])
 
     @staticmethod
+    def _trace_safe(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: ("<redacted>" if key in {"callback_url", "authorization", "token"} else SmartWateringCliApp._trace_safe(item))
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [SmartWateringCliApp._trace_safe(item) for item in value]
+        return value
+
+    def operation_trace(self, operation_id: str) -> dict[str, Any] | None:
+        operation = self.operations.detail(operation_id)
+        if operation is None:
+            return None
+        return {
+            "operation": self._trace_safe(operation),
+            "events": self._trace_safe(self.operations.events(operation_id)),
+            "related_operations": self._trace_safe(self.operations.related(operation_id)),
+        }
+
+    @staticmethod
+    def format_trace_event(event: dict[str, Any], started_at: float) -> str:
+        occurred_at = float(event["created_at"])
+        timestamp = datetime.fromtimestamp(occurred_at, timezone.utc).astimezone().isoformat(timespec="milliseconds")
+        delta_ms = int(round((occurred_at - started_at) * 1000))
+        line = (
+            f"{timestamp}\t+{delta_ms}ms\t{event['source']}\t"
+            f"{event['event_type']}\t{event['status']}\t{event['detail']}"
+        )
+        if event.get("data"):
+            line += "\n  " + json.dumps(event["data"], ensure_ascii=False, sort_keys=True)
+        return line
+
+    @staticmethod
+    def format_operation_trace(trace: dict[str, Any]) -> str:
+        operation = trace["operation"]
+        duration_end = operation.get("finished_at") or operation.get("updated_at")
+        duration = max(0.0, float(duration_end) - float(operation["created_at"]))
+        lines = [
+            f"operation: {operation['operation_id']}",
+            f"correlation: {operation['correlation_id']}",
+            f"caused by: {operation.get('causation_id') or '-'}",
+            f"device: {operation['device']}",
+            f"type: {operation['type']}",
+            f"status: {operation['status']}",
+            f"duration: {duration:.3f}s",
+            "payload: " + json.dumps(operation.get("payload") or {}, ensure_ascii=False, sort_keys=True),
+            "result: " + json.dumps(operation.get("result"), ensure_ascii=False, sort_keys=True),
+            "",
+            "time\tdelta\tsource\tevent\tstatus\tdetail",
+        ]
+        lines.extend(
+            SmartWateringCliApp.format_trace_event(event, float(operation["created_at"]))
+            for event in trace["events"]
+        )
+        related = trace["related_operations"]
+        if related:
+            lines.extend(("", "related operations:"))
+            lines.extend(
+                f"{row['operation_id']}\t{OperationLog.public_type(row['operation_type'])}\t"
+                f"{row['status']}\tcaused_by={row.get('causation_id') or '-'}"
+                for row in related
+            )
+        return "\n".join(lines)
+
+    def trace_operation(self, operation_id: str, follow: bool, as_json: bool) -> bool:
+        trace = self.operation_trace(operation_id)
+        if trace is None:
+            print("failed: operation not found")
+            return False
+        if not follow:
+            print(json.dumps(trace, ensure_ascii=False, indent=2, sort_keys=True) if as_json else self.format_operation_trace(trace))
+            return True
+
+        deadline = time.time() + self.operation_wait_timeout_sec
+        shown_event_ids: set[int] = set()
+        if not as_json:
+            operation = trace["operation"]
+            print(f"tracing {operation_id} ({operation['type']} on {operation['device']})")
+        while True:
+            trace = self.operation_trace(operation_id)
+            if trace is None:
+                print("failed: operation disappeared")
+                return False
+            if not as_json:
+                for event in trace["events"]:
+                    if event["id"] not in shown_event_ids:
+                        print(self.format_trace_event(event, float(trace["operation"]["created_at"])))
+                        shown_event_ids.add(event["id"])
+            if trace["operation"]["status"] in OP_TERMINAL_STATUSES:
+                if as_json:
+                    print(json.dumps(trace, ensure_ascii=False, indent=2, sort_keys=True))
+                return True
+            if time.time() >= deadline:
+                print(f"failed: trace did not finish within {self.operation_wait_timeout_sec}s")
+                return False
+            time.sleep(self.operation_poll_interval_sec)
+
+    @staticmethod
     def format_operation_result(operation: dict[str, Any], events: list[dict[str, Any]]) -> str:
         operation_type = OperationLog.public_type(operation["operation_type"])
         latest_detail = events[-1]["detail"] if events else operation["status"]
@@ -186,17 +285,24 @@ class SmartWateringCliApp(SmartWateringService):
     @staticmethod
     def format_main_menu() -> str:
         return "\n".join([
-            "", "Smart Watering", "", "Devices",
-            "1. Register device", "2. List devices", "3. Remove device", "4. Configure device",
-            "24. Change MCU ID", "",
-            "Read", "5. Show device status", "6. Show device metrics", "7. Show device constants", "",
-            "Watering", "8. Start watering", "9. Stop watering", "",
-            "Device actions", "10. Enable sleep", "11. Disable sleep", "12. Set sleep interval", "13. Set zero", "14. Calibrate scale", "",
-            "Operations", "15. Show pending queue", "16. Clear device queue", "17. Show recent operations", "",
-            "Callback", "18. Show callback URL", "",
-            "Users", "19. Add API user", "20. List API users", "21. Drop API user", "",
-            "Statistics", "22. Sync detected watering history",
-            "23. Hard drop detected watering history", "", "0. Exit",
+            "", "Smart Watering", "",
+            "1. Devices",
+            "2. Read",
+            "3. Watering",
+            "4. Device actions",
+            "5. Operations",
+            "6. Callback",
+            "7. Users",
+            "8. Statistics",
+            "", "0. Exit",
+        ])
+
+    @staticmethod
+    def format_submenu(title: str, items: list[tuple[str, str, Any]]) -> str:
+        return "\n".join([
+            "", title, "",
+            *(f"{key}. {label}" for key, label, _action in items),
+            "", "0. Back",
         ])
 
     @staticmethod
@@ -380,6 +486,10 @@ class SmartWateringCliApp(SmartWateringService):
         subparsers.add_parser("pending", help="Show queued commands")
         operations = subparsers.add_parser("operations", help="Show recent operations or one operation event log")
         operations.add_argument("operation_id", nargs="?")
+        trace = subparsers.add_parser("trace", help="Show a structured chronological operation trace")
+        trace.add_argument("operation_id")
+        trace.add_argument("--follow", action="store_true", help="Follow events until a terminal status")
+        trace.add_argument("--json", action="store_true", help="Print machine-readable JSON")
         watering_history = subparsers.add_parser(
             "watering-history", help="Manage detected plant watering history"
         )
@@ -687,6 +797,17 @@ class SmartWateringCliApp(SmartWateringService):
         if operation_id:
             print(self.format_operation_detail(self.operations.get(operation_id), self.operations.events(operation_id)))
 
+    def interactive_trace_operation(self) -> None:
+        operation_id = self.prompt("Operation id")
+        if not operation_id:
+            print("cancelled")
+            return
+        trace = self.operation_trace(operation_id)
+        if trace is None:
+            print("operation: not found")
+            return
+        print(self.format_operation_trace(trace))
+
     @staticmethod
     def read_password(confirm: bool = True) -> str:
         password = getpass.getpass("Password: ")
@@ -777,39 +898,16 @@ class SmartWateringCliApp(SmartWateringService):
             return
         self.hard_drop_detected_watering_history(device_name)
 
-    def run_interactive(self) -> int:
-        actions = {
-            "1": self.interactive_register_device,
-            "2": lambda: print(self.format_devices(self.registry.list())),
-            "3": self.interactive_remove_device,
-            "4": self.interactive_configure_device,
-            "5": self.interactive_show_status,
-            "6": self.interactive_show_metrics,
-            "7": self.interactive_show_constants,
-            "8": self.interactive_fill_tank,
-            "9": self.interactive_stop_watering,
-            "10": self.interactive_enable_sleep,
-            "11": self.interactive_disable_sleep,
-            "12": self.interactive_set_sleep_interval,
-            "13": self.interactive_set_zero,
-            "14": self.interactive_calibrate_scale,
-            "15": lambda: print(self.queue.format_status()),
-            "16": self.interactive_clear_device_queue,
-            "17": self.interactive_show_operations,
-            "18": lambda: print(self.callback_url()),
-            "19": self.interactive_add_user,
-            "20": lambda: print(self.format_users(self.auth.list_users())),
-            "21": self.interactive_drop_user,
-            "22": self.interactive_sync_detected_watering_history,
-            "23": self.interactive_hard_drop_detected_watering_history,
-            "24": self.interactive_change_controller_id,
-        }
+    def run_interactive_submenu(
+        self, title: str, items: list[tuple[str, str, Any]],
+    ) -> None:
+        actions = {key: action for key, _label, action in items}
         while True:
             self.clear_interactive_screen()
-            print(self.format_main_menu())
-            choice = input("Choice: ").strip()
-            if choice in {"0", "q", "quit", "exit"}:
-                return 0
+            print(self.format_submenu(title, items))
+            choice = input("Choice: ").strip().lower()
+            if choice in {"0", "b", "back", "q", "quit"}:
+                return
             action = actions.get(choice)
             if action is None:
                 self.show_interactive_message("error: unknown menu item")
@@ -819,6 +917,62 @@ class SmartWateringCliApp(SmartWateringService):
                 self.wait_for_interactive_continue()
             except SmartWateringError as exc:
                 self.show_interactive_message(f"error: {exc}")
+
+    def run_interactive(self) -> int:
+        menus = {
+            "1": ("Devices", [
+                ("1", "Add device", self.interactive_register_device),
+                ("2", "List devices", lambda: print(self.format_devices(self.registry.list()))),
+                ("3", "Remove device", self.interactive_remove_device),
+                ("4", "Configure device", self.interactive_configure_device),
+                ("5", "Change MCU ID", self.interactive_change_controller_id),
+            ]),
+            "2": ("Read", [
+                ("1", "Show device status", self.interactive_show_status),
+                ("2", "Show device metrics", self.interactive_show_metrics),
+                ("3", "Show device constants", self.interactive_show_constants),
+            ]),
+            "3": ("Watering", [
+                ("1", "Start watering", self.interactive_fill_tank),
+                ("2", "Stop watering", self.interactive_stop_watering),
+            ]),
+            "4": ("Device actions", [
+                ("1", "Enable sleep", self.interactive_enable_sleep),
+                ("2", "Disable sleep", self.interactive_disable_sleep),
+                ("3", "Set sleep interval", self.interactive_set_sleep_interval),
+                ("4", "Set zero", self.interactive_set_zero),
+                ("5", "Calibrate scale", self.interactive_calibrate_scale),
+            ]),
+            "5": ("Operations", [
+                ("1", "Show pending queue", lambda: print(self.queue.format_status())),
+                ("2", "Clear device queue", self.interactive_clear_device_queue),
+                ("3", "Show recent operations", self.interactive_show_operations),
+                ("4", "Trace operation", self.interactive_trace_operation),
+            ]),
+            "6": ("Callback", [
+                ("1", "Show callback URL", lambda: print(self.callback_url())),
+            ]),
+            "7": ("Users", [
+                ("1", "Add API user", self.interactive_add_user),
+                ("2", "List API users", lambda: print(self.format_users(self.auth.list_users()))),
+                ("3", "Drop API user", self.interactive_drop_user),
+            ]),
+            "8": ("Statistics", [
+                ("1", "Sync detected watering history", self.interactive_sync_detected_watering_history),
+                ("2", "Hard drop detected watering history", self.interactive_hard_drop_detected_watering_history),
+            ]),
+        }
+        while True:
+            self.clear_interactive_screen()
+            print(self.format_main_menu())
+            choice = input("Choice: ").strip().lower()
+            if choice in {"0", "q", "quit", "exit"}:
+                return 0
+            menu = menus.get(choice)
+            if menu is None:
+                self.show_interactive_message("error: unknown menu item")
+                continue
+            self.run_interactive_submenu(*menu)
 
     def run(self, argv: list[str] | None = None) -> int:
         args = self.build_parser().parse_args(argv)
@@ -915,6 +1069,8 @@ class SmartWateringCliApp(SmartWateringService):
                 else:
                     print(self.format_operations(self.operations.list_recent()))
                 return 0
+            if args.command == "trace":
+                return 0 if self.trace_operation(args.operation_id, args.follow, args.json) else 1
             if args.command == "watering-history":
                 if args.watering_history_command == "sync":
                     self.sync_detected_watering_history(args.days, args.device)

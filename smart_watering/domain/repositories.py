@@ -726,8 +726,12 @@ class OperationLog:
     def log(message: str) -> None:
         print(f"operations: {message}", flush=True)
 
-    def create(self, device_name: str, operation_type: str, payload: dict[str, Any]) -> str:
+    def create(
+        self, device_name: str, operation_type: str, payload: dict[str, Any],
+        correlation_id: str | None = None, causation_id: str | None = None,
+    ) -> str:
         operation_id = str(uuid.uuid4())
+        correlation_id = correlation_id or operation_id
         now = time.time()
         payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
@@ -736,6 +740,8 @@ class OperationLog:
             session.add(
                 OperationRecord(
                     operation_id=operation_id,
+                    correlation_id=correlation_id,
+                    causation_id=causation_id,
                     device_id=device_id,
                     target_name=device_name if device_id is None else None,
                     operation_type=operation_type,
@@ -750,6 +756,9 @@ class OperationLog:
                     operation_id=operation_id,
                     status=OP_QUEUED,
                     detail="operation queued",
+                    source="backend",
+                    event_type="operation.created",
+                    data_json=json.dumps({"operation_type": self.public_type(operation_type)}, sort_keys=True),
                     created_at=now,
                 )
             )
@@ -760,7 +769,30 @@ class OperationLog:
         )
         return operation_id
 
-    def event(self, operation_id: str, status: str, detail: str) -> None:
+    def trace_event(
+        self, operation_id: str, source: str, event_type: str, detail: str,
+        data: dict[str, Any] | None = None, status: str | None = None,
+    ) -> None:
+        now = time.time()
+        with self.store.session() as session:
+            row = session.get(OperationRecord, operation_id)
+            if row is None:
+                self.log(f"trace skipped operation_id={operation_id} event_type={event_type} reason=not_found")
+                return
+            session.add(OperationEventRecord(
+                operation_id=operation_id,
+                status=status or row.status,
+                detail=detail,
+                source=source,
+                event_type=event_type,
+                data_json=json.dumps(data, ensure_ascii=False, sort_keys=True) if data else None,
+                created_at=now,
+            ))
+
+    def event(
+        self, operation_id: str, status: str, detail: str, *, source: str = "backend",
+        event_type: str = "operation.status_changed", data: dict[str, Any] | None = None,
+    ) -> None:
         now = time.time()
         with self.store.session() as session:
             row = session.get(OperationRecord, operation_id)
@@ -791,12 +823,33 @@ class OperationLog:
                         and latest_error.detail.strip().lower() in {"accepted", "received"}
                     )
                 if not misclassified_ack:
+                    session.add(OperationEventRecord(
+                        operation_id=operation_id,
+                        status=row.status,
+                        detail=f"ignored {status}: operation is already terminal",
+                        source=source,
+                        event_type="operation.event_ignored",
+                        data_json=json.dumps({"attempted_status": status, "reason": "terminal"}, sort_keys=True),
+                        created_at=now,
+                    ))
                     self.log(
                         f"event skipped operation_id={operation_id} status={status} "
                         f"reason=terminal current_status={row.status}"
                     )
                     return
             if OP_STATUS_RANK.get(status, 0) < OP_STATUS_RANK.get(row.status, 0):
+                session.add(OperationEventRecord(
+                    operation_id=operation_id,
+                    status=row.status,
+                    detail=f"ignored status regression to {status}",
+                    source=source,
+                    event_type="operation.event_ignored",
+                    data_json=json.dumps({
+                        "attempted_status": status, "current_status": row.status,
+                        "reason": "status_regression",
+                    }, sort_keys=True),
+                    created_at=now,
+                ))
                 self.log(
                     f"event skipped operation_id={operation_id} status={status} "
                     f"reason=status_regression current_status={row.status}"
@@ -815,6 +868,9 @@ class OperationLog:
                     operation_id=operation_id,
                     status=status,
                     detail=detail,
+                    source=source,
+                    event_type=event_type,
+                    data_json=json.dumps(data, ensure_ascii=False, sort_keys=True) if data else None,
                     created_at=now,
                 )
             )
@@ -884,6 +940,8 @@ class OperationLog:
                         operation_id=row.operation_id,
                         status=OP_CANCELLED,
                         detail=detail,
+                        source="backend",
+                        event_type="operation.cancelled",
                         created_at=now,
                     )
                 )
@@ -912,6 +970,8 @@ class OperationLog:
                         operation_id=row.operation_id,
                         status=OP_CANCELLED,
                         detail=detail,
+                        source="backend",
+                        event_type="operation.cancelled",
                         created_at=now,
                     )
                 )
@@ -947,6 +1007,8 @@ class OperationLog:
     def get(self, operation_id: str) -> dict[str, Any] | None:
         fields = (
             "operation_id",
+            "correlation_id",
+            "causation_id",
             "device_name",
             "operation_type",
             "payload_json",
@@ -960,18 +1022,61 @@ class OperationLog:
         return record_to_mapping(row, fields) if row is not None else None
 
     def events(self, operation_id: str) -> list[dict[str, Any]]:
-        fields = ("operation_id", "status", "detail", "created_at")
+        fields = (
+            "id", "operation_id", "status", "detail", "source", "event_type",
+            "data_json", "created_at",
+        )
+        with self.store.session() as session:
+            query = select(OperationEventRecord).where(
+                OperationEventRecord.operation_id == operation_id,
+                OperationEventRecord.event_type.not_like("http.%"),
+            )
+            rows = session.scalars(
+                query
+                .order_by(OperationEventRecord.created_at, OperationEventRecord.id)
+            ).all()
+        events = [record_to_mapping(row, fields) for row in rows]
+        for event in events:
+            raw = event.pop("data_json", None)
+            try:
+                event["data"] = json.loads(raw) if raw else None
+            except json.JSONDecodeError:
+                event["data"] = {"raw": raw}
+        return events
+
+    @staticmethod
+    def is_status_event(event: dict[str, Any]) -> bool:
+        return event["event_type"] in {
+            "operation.created", "operation.status_changed", "command.picked",
+            "command.accepted", "callback.status", "operation.running",
+            "operation.succeeded", "operation.failed", "operation.timed_out",
+            "operation.cancelled",
+        }
+
+    def related(self, operation_id: str) -> list[dict[str, Any]]:
+        operation = self.get(operation_id)
+        if operation is None:
+            return []
+        fields = (
+            "operation_id", "correlation_id", "causation_id", "device_name",
+            "operation_type", "status", "created_at", "updated_at",
+        )
         with self.store.session() as session:
             rows = session.scalars(
-                select(OperationEventRecord)
-                .where(OperationEventRecord.operation_id == operation_id)
-                .order_by(OperationEventRecord.created_at, OperationEventRecord.id)
+                select(OperationRecord)
+                .where(
+                    OperationRecord.correlation_id == operation["correlation_id"],
+                    OperationRecord.operation_id != operation_id,
+                )
+                .order_by(OperationRecord.created_at, OperationRecord.operation_id)
             ).all()
         return [record_to_mapping(row, fields) for row in rows]
 
     @staticmethod
     def error_from_events(events: list[dict[str, Any]]) -> dict[str, Any] | None:
         for event in reversed(events):
+            if not OperationLog.is_status_event(event):
+                continue
             if event["status"] in {OP_ERROR, OP_TIMEOUT, OP_CANCELLED}:
                 detail = str(event["detail"])
                 if event["status"] == OP_ERROR and detail.strip().lower() in {"accepted", "received"}:
@@ -1029,19 +1134,20 @@ class OperationLog:
         events: list[dict[str, Any]],
     ) -> dict[str, Any]:
         payload = self.payload(operation)
+        status_events = [event for event in events if self.is_status_event(event)]
         created_at = operation["created_at"]
         updated_at = operation["updated_at"]
         started_at = next(
-            (event["created_at"] for event in events if event["status"] in {OP_SENDING, OP_ACCEPTED, OP_RUNNING}),
+            (event["created_at"] for event in status_events if event["status"] in {OP_SENDING, OP_ACCEPTED, OP_RUNNING}),
             None,
         )
         finished_at = next(
-            (event["created_at"] for event in reversed(events) if event["status"] in OP_TERMINAL_STATUSES),
+            (event["created_at"] for event in reversed(status_events) if event["status"] in OP_TERMINAL_STATUSES),
             None,
         )
         status = operation["status"]
         terminal_events = [
-            event for event in events
+            event for event in status_events
             if event["status"] in OP_TERMINAL_STATUSES
         ]
         if terminal_events:
@@ -1051,19 +1157,21 @@ class OperationLog:
             status = terminal_events[-1]["status"]
         if status == OP_ERROR and any(
             event["status"] == OP_ERROR and str(event["detail"]).strip().lower() in {"accepted", "received"}
-            for event in events
+            for event in status_events
         ):
             status = OP_ACCEPTED
         result = self.result(operation)
         result_received_at = None
         if result is not None:
             result_received_at = next(
-                (event["created_at"] for event in reversed(events) if event["status"] == OP_SUCCESS),
+                (event["created_at"] for event in reversed(status_events) if event["status"] == OP_SUCCESS),
                 operation["updated_at"],
             )
 
         return {
             "operation_id": operation["operation_id"],
+            "correlation_id": operation.get("correlation_id", operation["operation_id"]),
+            "causation_id": operation.get("causation_id"),
             "device": operation["device_name"],
             "type": self.public_type(operation["operation_type"]),
             "status": status,
@@ -1088,7 +1196,7 @@ class OperationLog:
         if not operations:
             return []
         operation_ids = [operation["operation_id"] for operation in operations]
-        event_fields = ("operation_id", "status", "detail", "created_at")
+        event_fields = ("operation_id", "status", "detail", "event_type", "created_at")
         with self.store.session() as session:
             rows = session.scalars(
                 select(OperationEventRecord)
@@ -1401,6 +1509,10 @@ class CommandQueue:
             f"enqueued operation_id={operation_id} device={device_name} "
             f"method={method} path={path} description={description!r}"
         )
+        OperationLog(self.store).trace_event(
+            operation_id, "queue", "command.queued", "command added to queue",
+            {"method": method, "path": path, "description": description},
+        )
         return operation_id
 
     def peek(self, device_name: str | None = None) -> QueuedCommand | None:
@@ -1422,8 +1534,15 @@ class CommandQueue:
 
     def pop(self, command_id: int) -> None:
         with self.store.session() as session:
+            row = session.get(CommandQueueRecord, command_id)
+            operation_id = row.operation_id if row is not None else None
             session.execute(delete(CommandQueueRecord).where(CommandQueueRecord.id == command_id))
         self.log(f"popped id={command_id}")
+        if operation_id is not None:
+            OperationLog(self.store).trace_event(
+                operation_id, "queue", "command.removed", "command removed from queue",
+                {"queue_id": command_id},
+            )
 
     def move_to_tail_if_other(
         self,

@@ -625,6 +625,32 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OperationEventsResponse"
+  /api/v2/operations/{operation_id}/trace:
+    get:
+      summary: Return operation, structured events, and correlated operations
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OperationId"
+      responses:
+        "200":
+          description: Full operation trace
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operation, events, related_operations]
+                properties:
+                  operation:
+                    type: object
+                  events:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/OperationEvent"
+                  related_operations:
+                    type: array
+                    items:
+                      type: object
 components:
   securitySchemes:
     bearerAuth:
@@ -1124,12 +1150,25 @@ components:
             $ref: "#/components/schemas/OperationEvent"
     OperationEvent:
       type: object
-      required: [status, message]
+      required: [id, status, message, source, event_type, created_at]
       properties:
+        id:
+          type: integer
         status:
           type: string
         message:
           type: string
+        source:
+          type: string
+        event_type:
+          type: string
+        data:
+          type: object
+          nullable: true
+          additionalProperties: true
+        created_at:
+          type: number
+          format: double
     ErrorResponse:
       type: object
       required: [error, message]

@@ -403,8 +403,13 @@ Terminal errors include an `error` object:
 Response `200`:
 
 ```json
-{"operation_id":"2d80e2fb-2c89-4c10-9667-63d8c42f9c6a","events":[{"status":"queued","message":"operation queued"},{"status":"sending","message":"worker picked operation"}]}
+{"operation_id":"2d80e2fb-2c89-4c10-9667-63d8c42f9c6a","events":[{"id":1,"status":"queued","message":"operation queued","source":"backend","event_type":"operation.created","data":null,"created_at":1782750010.0}]}
 ```
+
+### `GET /api/v2/operations/{operation_id}/trace`
+
+Returns the complete operation document, its structured chronological events,
+and every operation sharing the same `correlation_id`.
 
 ## Client Flow
 

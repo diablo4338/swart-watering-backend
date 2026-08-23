@@ -41,6 +41,11 @@ def operation_events(operation_id: str, api: RuntimeDep, _session: SessionDep) -
     return api.service.operation_events_response(operation_id)
 
 
+@router.get("/operations/{operation_id}/trace")
+def operation_trace(operation_id: str, api: RuntimeDep, _session: SessionDep) -> dict[str, Any]:
+    return api.service.operation_trace_response(operation_id)
+
+
 @router.get("/watering/history")
 def watering_history(
     api: RuntimeDep,

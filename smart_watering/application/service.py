@@ -80,11 +80,14 @@ class SmartWateringService:
     def _enqueue(
         self, device: Device, operation_type: str, path: str,
         payload: dict | None, description: str, method: str = "POST",
+        correlation_id: str | None = None, causation_id: str | None = None,
     ) -> str:
         duplicate = self.queue.find_duplicate(device.base_url, path, method, payload)
         if duplicate is not None:
             return duplicate
-        operation_id = self.operations.create(device.name, operation_type, payload or {})
+        operation_id = self.operations.create(
+            device.name, operation_type, payload or {}, correlation_id, causation_id,
+        )
         command_payload = self.build_operation_payload(operation_id, payload)
         self.operations.update_payload(operation_id, command_payload)
         queued_id = self.queue.enqueue(
@@ -171,8 +174,26 @@ class SmartWateringService:
             raise SmartWateringError(
                 f"watering can only be stopped on tank devices, got {device.name} ({device.device_type})"
             )
-        operation_id = self._enqueue(device, "watering_stop", "/watering/stop", {}, f"stop {device.name}")
-        self.operations.cancel_active_watering_starts(device.name, "cancelled by watering stop")
+        active = self.operations.latest_non_terminal_watering_start(device.name)
+        cause_id = active["operation_id"] if active else None
+        correlation_id = active.get("correlation_id") if active else None
+        operation_id = self._enqueue(
+            device, "watering_stop", "/watering/stop", {}, f"stop {device.name}",
+            correlation_id=correlation_id, causation_id=cause_id,
+        )
+        cancelled = self.operations.cancel_active_watering_starts(
+            device.name, "cancelled by watering stop"
+        )
+        for cancelled_id in cancelled:
+            self.operations.trace_event(
+                cancelled_id, "backend", "operation.related", "cancelled by watering stop",
+                {"related_operation_id": operation_id, "relation": "cancelled_by"},
+            )
+        if cancelled:
+            self.operations.trace_event(
+                operation_id, "backend", "operation.related", "watering starts cancelled",
+                {"related_operation_ids": cancelled, "relation": "cancels"},
+            )
         self.queue.drop_pending_watering_start(device.name)
         return operation_id
 

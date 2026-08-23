@@ -131,6 +131,7 @@ def test_fastapi_registers_documented_v2_routes() -> None:
         assert "/api/v2/devices/{device_name}/operations" in paths
         assert "/api/v2/operations" not in paths
         assert "/api/v2/operations/{operation_id}/events" in paths
+        assert "/api/v2/operations/{operation_id}/trace" in paths
         assert "/api/v2/devices/{device_name}/detected-waterings" in paths
         assert (
             "/api/v2/devices/{device_name}/detected-waterings/{event_id}" in paths

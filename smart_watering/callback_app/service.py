@@ -44,7 +44,27 @@ class CallbackService:
         status = normalize_operation_status(str(payload.get("status", OP_ERROR)))
         detail = str(payload.get("detail", "callback"))
         operation = self.operations.get(operation_id)
-        self.operations.event(operation_id, status, detail)
+        trace_event = getattr(self.operations, "trace_event", None)
+        if callable(trace_event):
+            trace_event(
+                operation_id, "callback", "callback.received", "controller callback received",
+                {key: value for key, value in payload.items() if key != "callback_url"},
+            )
+        event_type = {
+            "running": "operation.running",
+            "success": "operation.succeeded",
+            "error": "operation.failed",
+            "timeout": "operation.timed_out",
+            "cancelled": "operation.cancelled",
+        }.get(status, "callback.status")
+        try:
+            self.operations.event(
+                operation_id, status, detail, source="callback", event_type=event_type,
+            )
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            self.operations.event(operation_id, status, detail)
         return CallbackResult(
             operation_id=operation_id,
             device=operation["device_name"] if operation else "unknown",
