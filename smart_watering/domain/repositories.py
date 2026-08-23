@@ -1582,6 +1582,13 @@ class CommandQueue:
             session.flush()
             new_id = deferred.id
         self.log(f"moved retry to tail old_id={command.id} new_id={new_id}")
+        OperationLog(self.store).trace_event(
+            command.operation_id,
+            "queue",
+            "command.requeued",
+            "retry moved command to queue tail",
+            {"old_queue_id": command.id, "new_queue_id": new_id},
+        )
         return new_id
 
     def drop_pending_watering_start(self, device_name: str) -> list[str]:

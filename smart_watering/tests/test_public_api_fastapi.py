@@ -218,6 +218,28 @@ def test_backend_name_update_returns_conflict_and_does_not_change_controller_nam
         assert renamed.json()["controller_name"] == "fern"
 
 
+def test_backend_name_is_not_accepted_as_controller_config() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        client, cli = make_client(temp_dir)
+        cli.auth.add_user("client", "secret-password")
+        cli.registry.add("10.0.0.1", "plant", "fern")
+        token = client.post(
+            "/api/v2/auth/login",
+            json={"username": "client", "password": "secret-password"},
+        ).json()["token"]
+
+        response = client.post(
+            "/api/v2/devices/fern/config",
+            json={"backend_name": "office"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_config"
+        assert cli.registry.get("fern").name == "fern"
+        assert cli.queue.list() == []
+
+
 def test_mutating_request_with_idempotency_key_replays_original_response() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         client, cli = make_client(temp_dir)

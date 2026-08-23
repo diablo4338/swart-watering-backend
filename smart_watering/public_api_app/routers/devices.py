@@ -285,7 +285,7 @@ def configure(
     _session: SessionDep,
 ) -> dict[str, Any]:
     allowed = {
-        "backend_name", "device_type", "dry_weight_g", "tare_weight_g",
+        "device_type", "dry_weight_g", "tare_weight_g",
         "wet_weight_g", "watering_loss_threshold_percent",
     }
     config = {key: value for key, value in payload.items() if key in allowed}

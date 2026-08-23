@@ -711,6 +711,24 @@ def test_registry_suffixes_duplicate_controller_name_without_changing_it() -> No
         assert third.controller_name == "plant_1"
 
 
+def test_device_selector_shows_backend_name_and_controller_id(monkeypatch, capsys) -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.registry.add("192.168.1.10", "plant", "fern")
+        app.registry.rename_backend("fern", "office")
+        monkeypatch.setattr("builtins.input", lambda _prompt: "1")
+
+        selected = app.choose_device("Change MCU ID")
+
+        assert selected is not None
+        assert selected.name == "office"
+        assert selected.controller_name == "fern"
+        assert (
+            "1. backend=office MCU_ID=fern (plant) 192.168.1.10"
+            in capsys.readouterr().out
+        )
+
+
 def test_controller_id_change_is_persisted_only_after_success_callback() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
@@ -1094,6 +1112,27 @@ def test_sleep_interval_command_deduplicates_identical_queued_command() -> None:
 
         assert second_operation_id == first_operation_id
         assert [command.operation_id for command in app.queue.list()] == [first_operation_id]
+
+
+def test_retry_queue_id_change_is_recorded_in_operation_trace() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.registry.add("192.168.1.10", "plant", "plant_1")
+        first_operation_id = app.queue_zero("plant_1")
+        app.queue_sleep("plant_1", True)
+        first_command = app.queue.peek()
+        assert first_command is not None
+        assert first_command.operation_id == first_operation_id
+
+        new_queue_id = app.queue.move_to_tail_if_other(first_command, time.time())
+
+        assert new_queue_id is not None
+        event = app.operations.events(first_operation_id)[-1]
+        assert event["event_type"] == "command.requeued"
+        assert event["data"] == {
+            "old_queue_id": first_command.id,
+            "new_queue_id": new_queue_id,
+        }
 
 
 def test_cli_warns_before_adding_conflicting_retryable_command(monkeypatch, capsys) -> None:

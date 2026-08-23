@@ -575,7 +575,10 @@ class SmartWateringCliApp(SmartWateringService):
         if not devices:
             raise SmartWateringError("no registered devices")
         for index, device in enumerate(devices, start=1):
-            print(f"{index}. {device.name} ({device.device_type}) {device.ip}")
+            print(
+                f"{index}. backend={device.name} MCU_ID={device.controller_name} "
+                f"({device.device_type}) {device.ip}"
+            )
         while True:
             raw_value = input(f"{prompt_text} [1-{len(devices)} or name, empty to cancel]: ").strip()
             if not raw_value:

@@ -774,17 +774,9 @@ components:
       type: object
       minProperties: 1
       properties:
-        backend_name:
-          type: string
-          description: Unique backend name applied only after the MCU confirms the operation successfully.
         device_type:
           type: string
           enum: [plant, tank]
-        backend_name:
-          type: string
-          description: Requested unique backend name; present while the change is pending and after completion.
-        name:
-          type: string
         dry_weight_g:
           type: number
         wet_weight_g:
