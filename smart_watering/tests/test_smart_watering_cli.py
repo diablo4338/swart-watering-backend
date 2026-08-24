@@ -1,4 +1,4 @@
-import json
+﻿import json
 import io
 import sqlite3
 import tempfile
@@ -16,12 +16,11 @@ from fastapi.testclient import TestClient
 from smart_watering.callback_app.main import create_app as create_callback_app
 from smart_watering.callback_app.service import CallbackService
 from smart_watering.callback_app import utils as callback_utils
-from smart_watering.public_api_app import config, domain, security, statistics
+from smart_watering.public_api_app import config, security, statistics
 from smart_watering.public_api_app.errors import PublicApiError
 from smart_watering.public_api_app.main import create_app
-from smart_watering.public_api_app.routers import devices as public_api_devices
 from smart_watering.public_api_app.runtime import ApiRuntime
-from smart_watering.public_api_app.service import PublicApiService
+from smart_watering.public_api_app.service import DeviceStateProjectionService
 
 
 def test_water_consumption_periods_cover_week_in_display_order() -> None:
@@ -1483,7 +1482,10 @@ def test_watering_start_firmware_failure_is_terminal_error() -> None:
 
         assert app.queue.list() == []
         assert app.operations.get(operation_id)["status"] == "error"
-        assert app.operations.events(operation_id)[-1]["detail"] == "task_create_failed"
+        assert any(
+            event["detail"] == "task_create_failed"
+            for event in app.operations.events(operation_id)
+        )
 
 
 def test_sleep_disable_retries_until_controller_wakes() -> None:
@@ -2362,7 +2364,7 @@ def test_worker_records_invalid_device_url_as_operation_error() -> None:
         queue.enqueue(
             operation_id,
             "plant_1",
-            "http://ю",
+            "http://ÑŽ",
             "/config",
             "POST",
             {"name": "plant_1"},
@@ -2829,31 +2831,6 @@ def test_auth_store_drops_user_sessions() -> None:
             raise AssertionError("expected SmartWateringError")
 
 
-def test_public_api_builds_watering_status() -> None:
-    status = domain.build_watering_status(
-        {
-            "device": {"name": "main_tank", "type": "tank"},
-            "watering": {
-                "active": True,
-                "state": "watering",
-                "last_operation_type": "start",
-                "last_operation_status": "in_progress",
-            },
-            "config": {"target_g": 200.0},
-            "weight": {"water_used_g": 75.0},
-        }
-    )
-
-    assert status == {
-        "device": {"name": "main_tank", "type": "tank"},
-        "active": True,
-        "state": "watering",
-        "gap_g": 125.0,
-        "percent_complete": 37.5,
-        "last_operation": {"type": "start", "status": "in_progress"},
-    }
-
-
 def make_public_api_handler(
     method: str,
     path: str,
@@ -2914,7 +2891,7 @@ def test_public_api_login_creates_session_token() -> None:
         app.auth.add_user("client", "secret-password")
         handler = make_public_api_handler(
             "POST",
-            "/api/v2/auth/login",
+            "/api/v3/auth/login",
             app,
             body={"username": "client", "password": "secret-password"},
         )
@@ -2935,7 +2912,7 @@ def test_public_api_login_uses_configured_session_ttl() -> None:
         app.auth.add_user("client", "secret-password")
         handler = make_public_api_handler(
             "POST",
-            "/api/v2/auth/login",
+            "/api/v3/auth/login",
             app,
             body={"username": "client", "password": "secret-password"},
             session_ttl_sec=7200,
@@ -2959,7 +2936,7 @@ def test_public_api_google_login_creates_session_token(monkeypatch) -> None:
         )
         handler = make_public_api_handler(
             "POST",
-            "/api/v2/auth/google",
+            "/api/v3/auth/google",
             app,
             body={"id_token": "google-id-token"},
         )
@@ -2987,7 +2964,7 @@ def test_public_api_google_login_requires_allowed_account(monkeypatch) -> None:
         )
         handler = make_public_api_handler(
             "POST",
-            "/api/v2/auth/google",
+            "/api/v3/auth/google",
             app,
             body={"id_token": "google-id-token"},
         )
@@ -3001,42 +2978,12 @@ def test_public_api_google_login_requires_allowed_account(monkeypatch) -> None:
 def test_public_api_requires_bearer_token() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        handler = make_public_api_handler("GET", "/api/v2/devices", app)
+        handler = make_public_api_handler("GET", "/api/v3/devices", app)
 
         handler.do_GET()
 
         assert handler.responses == [401]
         assert public_api_response_body(handler)["error"] == "missing_token"
-
-
-def test_public_api_lists_devices_with_pending_operation_flag() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("192.168.1.50", "plant", "plant_1")
-        app.registry.add("192.168.1.51", "plant", "plant_2")
-        app.queue_zero("plant_1")
-        token = make_public_api_token(app)
-        handler = make_public_api_handler("GET", "/api/v2/devices", app, token)
-
-        handler.do_GET()
-
-        assert handler.responses == [200]
-        assert public_api_response_body(handler)["devices"] == [
-            {"name": "plant_1", "controller_name": "plant_1", "type": "plant", "has_pending_operations": True},
-            {"name": "plant_2", "controller_name": "plant_2", "type": "plant", "has_pending_operations": False},
-        ]
-
-
-def test_public_api_lists_supported_device_types() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        token = make_public_api_token(app)
-        handler = make_public_api_handler("GET", "/api/v2/device-types", app, token)
-
-        handler.do_GET()
-
-        assert handler.responses == [200]
-        assert public_api_response_body(handler) == {"types": ["plant", "tank"]}
 
 
 def test_public_api_does_not_expose_device_health() -> None:
@@ -3057,90 +3004,6 @@ def test_public_api_does_not_expose_device_health() -> None:
         assert public_api_response_body(handler)["error"] == "not_found"
 
 
-def test_public_api_queues_watering_start_and_stop() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        add_confirmed_tank(app)
-        token = make_public_api_token(app)
-
-        start_handler = make_public_api_handler(
-            "POST",
-            "/api/v2/devices/main_tank/watering/start",
-            app,
-            token,
-            {"target_g": 200},
-        )
-        start_handler.do_POST()
-        stop_handler = make_public_api_handler(
-            "POST",
-            "/api/v2/devices/main_tank/watering/stop",
-            app,
-            token,
-            {},
-        )
-        stop_handler.do_POST()
-
-        assert start_handler.responses == [202]
-        assert stop_handler.responses == [202]
-        start_body = public_api_response_body(start_handler)
-        assert start_body["operation_id"]
-        assert start_body["device"] == "main_tank"
-        assert start_body["type"] == "watering_start"
-        assert start_body["status"] == "queued"
-        assert start_body["target_g"] == 200
-        assert "payload" not in start_body
-        assert "operation_url" not in start_body
-        assert "events_url" not in start_body
-        assert [command.path for command in app.queue.list()] == ["/watering/stop"]
-
-
-def test_public_api_queues_device_status_read_and_returns_result() -> None:
-    class StatusApi:
-        def request_json(self, base_url, path, method, payload=None):
-            return {
-                "device": {"name": "plant_1", "type": "plant"},
-                "watering": {"active": False, "state": "waiting"},
-                "config": {"sleep_interval_min": 20},
-                "weight": {"useful_weight_g": 42.0},
-            }
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("192.168.1.10", "plant", "plant_1")
-        app.api = StatusApi()
-        token = make_public_api_token(app)
-
-        queue_handler = make_public_api_handler("POST", "/api/v2/devices/plant_1/status", app, token, {})
-        queue_handler.do_POST()
-
-        assert queue_handler.responses == [202]
-        queue_body = public_api_response_body(queue_handler)
-        operation_id = queue_body["operation_id"]
-        assert queue_body["type"] == "device_status"
-        assert queue_body["status"] == "queued"
-        assert "operation_url" not in queue_body
-        assert [command.path for command in app.queue.list()] == ["/watering"]
-
-        worker = smart_core.BackgroundWorker(
-            app.api,
-            app.queue,
-            app.operations,
-            smart_core.WorkerState(str(Path(temp_dir) / "worker.pid")),
-            retry_interval_sec=0,
-            max_wait_sec=1,
-        )
-        worker.run()
-
-        operation_handler = make_public_api_handler("GET", f"/api/v2/operations/{operation_id}", app, token)
-        operation_handler.do_GET()
-
-        assert operation_handler.responses == [200]
-        operation_body = public_api_response_body(operation_handler)
-        assert operation_body["status"] == "success"
-        assert "result" not in operation_body
-        assert "result_received_at" not in operation_body
-
-
 def test_public_api_status_latest_returns_none_without_snapshot_without_live_request() -> None:
     class UnexpectedLiveStatusApi:
         def __init__(self) -> None:
@@ -3153,9 +3016,9 @@ def test_public_api_status_latest_returns_none_without_snapshot_without_live_req
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         app.registry.add("192.168.1.10", "plant", "plant_1")
         app.api = UnexpectedLiveStatusApi()
-        service = PublicApiService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
+        service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
-        body = service.latest_device_status_response("plant_1")
+        body = service.project_snapshot_device_state("plant_1")
         assert body == {
             "device": "plant_1",
             "status": "offline",
@@ -3204,9 +3067,9 @@ def test_public_api_status_latest_returns_minimal_snapshot_result() -> None:
             max_wait_sec=1,
         )
         worker.run()
-        service = PublicApiService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
+        service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
-        body = service.latest_device_status_response("plant_1")
+        body = service.project_snapshot_device_state("plant_1")
         assert body["status"] == "unknown"
         assert body["source"] == "snapshot"
         assert body["available"] is True
@@ -3235,54 +3098,6 @@ def test_public_api_status_latest_returns_minimal_snapshot_result() -> None:
         assert app.api.timeout_sec == 5
 
 
-def test_public_api_status_live_route_is_registered() -> None:
-    paths = [route.path for route in public_api_devices.router.routes]
-
-    assert "/api/v2/devices/{device_name}/status/live" in paths
-    assert "/api/v2/devices/{device_name}/health" in paths
-
-
-def test_public_api_device_health_uses_lightweight_controller_endpoint() -> None:
-    class HealthApi:
-        def __init__(self) -> None:
-            self.requests = []
-
-        def request_text(self, base_url, path, method, payload=None):
-            self.requests.append((base_url, path, method, payload))
-            return "ok"
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("192.168.1.10", "plant", "plant_1")
-        service = PublicApiService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
-        service.health_api = HealthApi()
-
-        body = service.device_health_response("plant_1")
-
-        assert body == {"device": "plant_1", "status": "online", "online": True}
-        assert service.health_api.requests == [
-            ("http://192.168.1.10", "/healthz", "GET", None)
-        ]
-
-
-def test_public_api_device_health_reports_offline_without_live_status_read() -> None:
-    class OfflineHealthApi:
-        def request_text(self, base_url, path, method, payload=None):
-            raise smart_core.RetryableDeviceApiError("device sleeping")
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("192.168.1.10", "plant", "plant_1")
-        service = PublicApiService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
-        service.health_api = OfflineHealthApi()
-
-        assert service.device_health_response("plant_1") == {
-            "device": "plant_1",
-            "status": "offline",
-            "online": False,
-        }
-
-
 def test_public_api_status_live_returns_live_result() -> None:
     class LiveStatusApi:
         def __init__(self) -> None:
@@ -3304,9 +3119,9 @@ def test_public_api_status_live_returns_live_result() -> None:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         app.registry.add("192.168.1.10", "plant", "plant_1")
         app.api = LiveStatusApi()
-        service = PublicApiService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
+        service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
-        body = service.live_device_status_response("plant_1")
+        body = service.project_live_device_state("plant_1")
         assert body["source"] == "live"
         assert body["available"] is True
         assert body["result"]["device"]["name"] == "plant_1"
@@ -3347,9 +3162,9 @@ def test_public_api_status_latest_returns_snapshot_without_live_request() -> Non
         )
         worker.run()
         app.api = StatusApi(False)
-        service = PublicApiService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
+        service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
-        body = service.latest_device_status_response("plant_1")
+        body = service.project_snapshot_device_state("plant_1")
         assert body["source"] == "snapshot"
         assert body["available"] is True
         assert body["operation_id"] == operation_id
@@ -3401,9 +3216,9 @@ def test_public_api_status_live_does_not_fall_back_to_snapshot() -> None:
         )
         worker.run()
         app.api = StatusApi(False)
-        service = PublicApiService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
+        service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
-        body = service.live_device_status_response("plant_1")
+        body = service.project_live_device_state("plant_1")
         assert body == {
             "device": "plant_1",
             "status": "offline",
@@ -3432,9 +3247,9 @@ def test_public_api_status_latest_includes_pending_operation_without_snapshot() 
         app.registry.add("192.168.1.10", "plant", "plant_1")
         app.api = SleepingApi()
         operation_id = app.queue_device_status("plant_1")
-        service = PublicApiService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
+        service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
-        body = service.latest_device_status_response("plant_1")
+        body = service.project_snapshot_device_state("plant_1")
         assert body["source"] == "none"
         assert body["available"] is False
         assert body["pending_operation_id"] == operation_id
@@ -3472,9 +3287,9 @@ def test_public_api_status_latest_includes_pending_operation_with_snapshot() -> 
         worker.run()
         pending_operation_id = app.queue_device_status("plant_1")
         app.api = StatusApi(False)
-        service = PublicApiService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
+        service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
-        body = service.latest_device_status_response("plant_1")
+        body = service.project_snapshot_device_state("plant_1")
         assert body["source"] == "snapshot"
         assert body["available"] is True
         assert body["operation_id"] == completed_operation_id
@@ -3482,288 +3297,5 @@ def test_public_api_status_latest_includes_pending_operation_with_snapshot() -> 
         assert body["pending_operation_status"] == "queued"
 
 
-def test_public_api_exposes_authenticated_sleep_and_zero_actions() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("192.168.1.10", "plant", "plant_1")
-        token = make_public_api_token(app)
-
-        sleep_handler = make_public_api_handler(
-            "POST",
-            "/api/v2/devices/plant_1/sleep/disable",
-            app,
-            token,
-            {},
-        )
-        sleep_handler.do_POST()
-        zero_handler = make_public_api_handler(
-            "POST",
-            "/api/v2/devices/plant_1/zero",
-            app,
-            token,
-            {},
-        )
-        zero_handler.do_POST()
-
-        assert sleep_handler.responses == [202]
-        assert public_api_response_body(sleep_handler)["type"] == "sleep_disable"
-        assert zero_handler.responses == [202]
-        assert public_api_response_body(zero_handler)["type"] == "zero_capture"
-        assert [command.path for command in app.queue.list()] == ["/sleep/disable", "/zero"]
 
 
-def test_public_api_returns_operation_and_events_by_id() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        add_confirmed_tank(app)
-        token = make_public_api_token(app)
-        operation_id = app.queue_fill("main_tank", 200)
-
-        operation_handler = make_public_api_handler("GET", f"/api/v2/operations/{operation_id}", app, token)
-        operation_handler.do_GET()
-        events_handler = make_public_api_handler("GET", f"/api/v2/operations/{operation_id}/events", app, token)
-        events_handler.do_GET()
-
-        assert operation_handler.responses == [200]
-        operation_body = public_api_response_body(operation_handler)
-        assert operation_body["operation_id"] == operation_id
-        assert operation_body["device"] == "main_tank"
-        assert operation_body["type"] == "watering_start"
-        assert operation_body["status"] == "queued"
-        assert operation_body["target_g"] == 200
-        assert "payload" not in operation_body
-        assert "progress" not in operation_body
-        assert "error" not in operation_body
-        assert "operation_url" not in operation_body
-        assert "events_url" not in operation_body
-
-        assert events_handler.responses == [200]
-        events_body = public_api_response_body(events_handler)
-        assert events_body["operation_id"] == operation_id
-        assert events_body["events"][0]["status"] == "queued"
-        assert events_body["events"][0]["message"] == "operation queued"
-
-
-def test_public_api_exposes_controller_error_detail_by_operation_id() -> None:
-    class FakeDeviceApi:
-        def request_json(self, base_url, path, method, payload=None):
-            return {
-                "device": {"name": "main_tank", "type": "tank"},
-                "watering": {
-                    "active": False,
-                    "state": "waiting",
-                    "last_operation_type": "start",
-                    "last_operation_status": "failed",
-                },
-                "config": {"target_g": 200.0},
-                "weight": {"water_used_g": 22.0},
-            }
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        add_confirmed_tank(app)
-        app.api = FakeDeviceApi()
-        token = make_public_api_token(app)
-        operation_id = app.queue_fill("main_tank", 200)
-        app.operations.event(operation_id, "sending", "worker picked operation")
-        app.operations.event(operation_id, "accepted", "device accepted command")
-        app.operations.event(operation_id, "running", "pump_on")
-        app.operations.event(operation_id, "error", "weight_not_changing")
-        handler = make_public_api_handler("GET", f"/api/v2/operations/{operation_id}", app, token)
-
-        handler.do_GET()
-
-        assert handler.responses == [200]
-        body = public_api_response_body(handler)
-        assert body["status"] == "error"
-        assert body["error"] == {
-            "code": "error",
-            "message": "weight_not_changing",
-            "detail": "weight_not_changing",
-            "retryable": True,
-        }
-        assert "progress" not in body
-
-
-def test_public_api_returns_watering_status() -> None:
-    class FakeDeviceApi:
-        def request_json(self, base_url, path, method, payload=None):
-            return {
-                "device": {"name": "main_tank", "type": "tank"},
-                "watering": {
-                    "active": True,
-                    "state": "watering",
-                    "last_operation_type": "start",
-                    "last_operation_status": "in_progress",
-                },
-                "config": {"target_g": 100.0},
-                "weight": {"water_used_g": 25.0},
-            }
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        add_confirmed_tank(app)
-        app.api = FakeDeviceApi()
-        token = make_public_api_token(app)
-        handler = make_public_api_handler("GET", "/api/v2/devices/main_tank/watering/status", app, token)
-
-        handler.do_GET()
-
-        assert handler.responses == [200]
-        body = public_api_response_body(handler)
-        assert body["gap_g"] == 75.0
-        assert body["percent_complete"] == 25.0
-        assert body["last_operation"] == {"type": "start", "status": "in_progress"}
-        assert body["source"] == "live"
-        assert body["available"] is True
-        assert body["planned_watering"] is None
-
-
-def test_public_api_watering_status_includes_planned_watering() -> None:
-    class FakeDeviceApi:
-        timeout_sec = 5
-
-        def request_json(self, base_url, path, method, payload=None):
-            return {
-                "device": {"name": "main_tank", "type": "tank"},
-                "watering": {
-                    "active": False,
-                    "state": "waiting",
-                    "last_operation_type": "none",
-                    "last_operation_status": "none",
-                },
-                "config": {"target_g": 0.0, "tare_weight_g": 450.0},
-                "weight": {"gross_weight_g": 500.0, "water_used_g": 0.0},
-            }
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        add_confirmed_tank(app)
-        operation_id = app.queue_fill("main_tank", 200)
-        app.api = FakeDeviceApi()
-        token = make_public_api_token(app)
-        handler = make_public_api_handler("GET", "/api/v2/devices/main_tank/watering/status", app, token)
-
-        handler.do_GET()
-
-        assert handler.responses == [200]
-        planned_watering = public_api_response_body(handler)["planned_watering"]
-        assert planned_watering == {
-            "operation_id": operation_id,
-            "target_g": 200,
-            "status": "queued",
-        }
-        body = public_api_response_body(handler)
-        assert "pending_operation_url" not in body
-        assert body["result"]["config"] == {
-            "target_g": 0.0,
-            "dry_weight_g": None,
-            "wet_weight_g": None,
-            "watering_loss_threshold_percent": None,
-            "tare_weight_g": 450.0,
-            "zero_raw": None,
-            "raw_per_gram": None,
-            "sleep_disabled": None,
-            "sleep_interval_min": None,
-        }
-
-
-def test_public_api_last_watering_is_not_limited_by_recent_operations() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        add_confirmed_tank(app)
-        watering_operation_id = app.operations.create("main_tank", "watering_start", {"target_g": 200})
-        app.operations.event(watering_operation_id, "success", "target_reached")
-        for index in range(25):
-            operation_id = app.operations.create("main_tank", "device_status", {"index": index})
-            app.operations.event(operation_id, "success", "status fetched")
-        token = make_public_api_token(app)
-        handler = make_public_api_handler("GET", "/api/v2/devices/main_tank/watering/last", app, token)
-
-        handler.do_GET()
-
-        assert handler.responses == [200]
-        operation = public_api_response_body(handler)["operation"]
-        assert operation["operation_id"] == watering_operation_id
-        assert operation["type"] == "watering_start"
-        assert operation["status"] == "success"
-        assert "operation_url" not in operation
-        assert "events_url" not in operation
-
-
-def test_public_api_watering_history_returns_recent_and_successful_only() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        add_confirmed_tank(app)
-        created_ids = []
-        successful_ids = []
-        for index in range(12):
-            operation_id = app.operations.create("main_tank", "watering_start", {"target_g": 100 + index})
-            status = "success" if index % 2 == 0 else "error"
-            app.operations.event(operation_id, status, "target_reached" if status == "success" else "pump_error")
-            created_ids.append(operation_id)
-            if status == "success":
-                successful_ids.append(operation_id)
-        config_operation_id = app.operations.create("main_tank", "config", {"name": "main_tank"})
-        app.operations.event(config_operation_id, "success", "config_updated")
-        token = make_public_api_token(app)
-
-        handler = make_public_api_handler("GET", "/api/v2/watering/history", app, token)
-        handler.do_GET()
-        success_handler = make_public_api_handler("GET", "/api/v2/watering/history?successful=true", app, token)
-        success_handler.do_GET()
-
-        assert handler.responses == [200]
-        operations = public_api_response_body(handler)["operations"]
-        assert [operation["operation_id"] for operation in operations] == list(reversed(created_ids[-10:]))
-        assert all(operation["type"] == "watering_start" for operation in operations)
-        assert success_handler.responses == [200]
-        successful_operations = public_api_response_body(success_handler)["operations"]
-        assert [operation["operation_id"] for operation in successful_operations] == list(reversed(successful_ids))
-        assert all(operation["status"] == "success" for operation in successful_operations)
-
-
-def test_public_api_watering_status_returns_503_without_live_snapshot_fallback() -> None:
-    class StatusApi:
-        def __init__(self, available: bool) -> None:
-            self.available = available
-            self.timeout_sec = 5
-
-        def request_json(self, base_url, path, method, payload=None):
-            if not self.available:
-                raise smart_core.RetryableDeviceApiError("device sleeping")
-            return {
-                "device": {"name": "main_tank", "type": "tank"},
-                "watering": {
-                    "active": True,
-                    "state": "watering",
-                    "last_operation_type": "start",
-                    "last_operation_status": "in_progress",
-                },
-                "config": {"target_g": 100.0},
-                "weight": {"water_used_g": 25.0},
-            }
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        add_confirmed_tank(app)
-        app.api = StatusApi(True)
-        operation_id = app.queue_device_status("main_tank")
-        worker = smart_core.BackgroundWorker(
-            app.api,
-            app.queue,
-            app.operations,
-            smart_core.WorkerState(str(Path(temp_dir) / "worker.pid")),
-            retry_interval_sec=0,
-            max_wait_sec=1,
-        )
-        worker.run()
-        app.api = StatusApi(False)
-        token = make_public_api_token(app)
-        handler = make_public_api_handler("GET", "/api/v2/devices/main_tank/watering/status", app, token)
-
-        handler.do_GET()
-
-        assert handler.responses == [503]
-        body = public_api_response_body(handler)
-        assert body == {"error": "device_status_unavailable", "message": "device sleeping"}

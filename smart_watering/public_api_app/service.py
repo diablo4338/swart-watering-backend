@@ -1,10 +1,10 @@
-import time
+﻿import time
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from smart_watering.application.service import SmartWateringService
-from smart_watering.domain import DeviceApiClient, SmartWateringError
+from smart_watering.domain import SmartWateringError
 
 from .domain import DeviceStatus, DeviceStatusSource, number_or_none
 from .errors import PublicApiError
@@ -18,151 +18,31 @@ from .statistics import (
     water_consumption_periods,
     water_consumption_query_end,
 )
+from .presence import DevicePresenceRegistry
 
 
-LATEST_STATUS_LIVE_TIMEOUT_SEC = 3
-DEVICE_HEALTH_TIMEOUT_SEC = 1
-CONTROL_OPERATION_TYPES = {
-    "config", "sleep_enable", "sleep_disable", "sleep_interval",
-    "zero_capture", "scale_calibration",
-}
+LIVE_STATE_REQUEST_TIMEOUT_SEC = 3
 
 
-class PublicApiService:
+class DeviceStateProjectionService:
     def __init__(
         self,
-        app: SmartWateringService,
+        business: SmartWateringService,
         prometheus_url: str,
         statistics_timezone: ZoneInfo,
         consumption_drop_threshold_percent: int = 30,
         consumption_median_days: int = 5,
+        presence: DevicePresenceRegistry | None = None,
     ) -> None:
-        self.app = app
-        self.health_api = DeviceApiClient(DEVICE_HEALTH_TIMEOUT_SEC)
+        self.business = business
         self.prometheus = PrometheusClient(prometheus_url)
         self.statistics_timezone = statistics_timezone
         self.consumption_drop_threshold_percent = consumption_drop_threshold_percent
         self.consumption_median_days = consumption_median_days
-
-    def operation_response(self, operation_id: str) -> dict[str, Any]:
-        operation = self.app.operations.detail(operation_id)
-        if operation is None:
-            raise PublicApiError(
-                f"operation '{operation_id}' does not exist",
-                404,
-                "operation_not_found",
-            )
-        return self.operation_response_from_detail(operation)
+        self.presence = presence or DevicePresenceRegistry()
 
     @staticmethod
-    def operation_response_from_detail(operation: dict[str, Any]) -> dict[str, Any]:
-        payload = operation.get("payload")
-        response = {
-            key: operation.get(key)
-            for key in ("operation_id", "device", "type", "status", "updated_at", "finished_at")
-        }
-        target_g = operation.get("target_g")
-        if not isinstance(target_g, (int, float)) and isinstance(payload, dict):
-            target_g = payload.get("target_g")
-        if isinstance(target_g, (int, float)):
-            response["target_g"] = target_g
-        if isinstance(payload, dict):
-            for key in (
-                "minutes", "weight_g", "device_type", "name", "backend_name", "dry_weight_g",
-                "tare_weight_g", "wet_weight_g", "watering_loss_threshold_percent",
-            ):
-                if key in payload:
-                    response[key] = payload[key]
-        if operation.get("error") is not None:
-            response["error"] = operation["error"]
-        return response
-
-    def operations_response(
-        self,
-        operations: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        return [
-            self.operation_response_from_detail(operation)
-            for operation in self.app.operations.details_from_operations(operations)
-        ]
-
-    def operation_events_response(self, operation_id: str) -> dict[str, Any]:
-        if self.app.operations.get(operation_id) is None:
-            raise PublicApiError(
-                f"operation '{operation_id}' does not exist",
-                404,
-                "operation_not_found",
-            )
-        return {
-            "operation_id": operation_id,
-            "events": [
-                {
-                    "id": event["id"],
-                    "status": event["status"],
-                    "message": event["detail"],
-                    "source": event["source"],
-                    "event_type": event["event_type"],
-                    "data": event["data"],
-                    "created_at": event["created_at"],
-                }
-                for event in self.app.operations.events(operation_id)
-            ],
-        }
-
-    def operation_trace_response(self, operation_id: str) -> dict[str, Any]:
-        operation = self.app.operations.detail(operation_id)
-        if operation is None:
-            raise PublicApiError(
-                f"operation '{operation_id}' does not exist", 404, "operation_not_found",
-            )
-        return self.trace_safe({
-            "operation": operation,
-            "events": self.app.operations.events(operation_id),
-            "related_operations": self.app.operations.related(operation_id),
-        })
-
-    @staticmethod
-    def trace_safe(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {
-                key: ("<redacted>" if key.lower() in {"callback_url", "authorization", "token"}
-                      else PublicApiService.trace_safe(item))
-                for key, item in value.items()
-            }
-        if isinstance(value, list):
-            return [PublicApiService.trace_safe(item) for item in value]
-        return value
-
-    def planned_watering_response(self, device_name: str) -> dict[str, Any] | None:
-        operation = self.app.operations.latest_non_terminal_watering_start(device_name)
-        if operation is None:
-            return None
-        return {
-            "operation_id": operation["operation_id"],
-            "target_g": operation["target_g"],
-            "status": operation["status"],
-        }
-
-    def last_watering_response(self, device_name: str) -> dict[str, Any]:
-        operation = self.app.operations.latest_terminal_watering_start(device_name)
-        return (
-            {"operation": None}
-            if operation is None
-            else {"operation": self.operation_response(operation["operation_id"])}
-        )
-
-    def watering_history_response(self, successful_only: bool = False) -> dict[str, Any]:
-        return {
-            "operations": [
-                self.operation_response(operation["operation_id"])
-                for operation in self.app.operations.list_recent_watering_starts(
-                    limit=10, successful_only=successful_only
-                )
-            ]
-        }
-
-    @staticmethod
-    def raw_status_response(payload: dict[str, Any]) -> dict[str, Any]:
+    def project_device_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         device = payload.get("device") or {}
         watering = payload.get("watering") or {}
         config = payload.get("config") or {}
@@ -195,20 +75,20 @@ class PublicApiService:
             },
         }
 
-    def latest_device_status_response(self, device_name: str) -> dict[str, Any]:
-        device = self.app.registry.get(device_name)
-        pending = self.pending_status_operation(device.name)
-        latest = self.app.operations.latest_successful_result(device.name, "device_status")
+    def project_snapshot_device_state(self, device_name: str) -> dict[str, Any]:
+        device = self.business.registry.get(device_name)
+        pending = self.find_pending_snapshot_operation(device.name)
+        latest = self.business.operations.latest_successful_result(device.name, "device_status")
         if latest is not None and latest["result"] is not None:
-            return self.available_status_response(
+            return self.project_available_device_state(
                 device_name=device.name,
                 source=DeviceStatusSource.SNAPSHOT,
-                result=self.raw_status_response(latest["result"]),
+                result=self.project_device_snapshot(latest["result"]),
                 result_received_at=latest["result_received_at"],
                 operation_id=latest["operation_id"],
                 pending=pending,
             )
-        return self.unavailable_status_response(
+        return self.project_unavailable_device_state(
             device_name=device.name,
             pending=pending,
             exc=SmartWateringError(
@@ -217,58 +97,58 @@ class PublicApiService:
             error_code="device_status_snapshot_not_found",
         )
 
-    def device_health_response(self, device_name: str) -> dict[str, Any]:
-        device = self.app.registry.get(device_name)
-        try:
-            self.health_api.request_text(
-                device.base_url, "/healthz", "GET"
-            )
-            online = True
-        except SmartWateringError:
-            online = False
-        return {
-            "device": device.name,
-            "status": DeviceStatus.ONLINE if online else DeviceStatus.OFFLINE,
-            "online": online,
-        }
+    def project_current_device_state(self, device_name: str) -> dict[str, Any]:
+        """Resolve live MCU data or atomically fall back to the stored snapshot."""
+        if not self.presence.get(device_name).online:
+            return {**self.project_snapshot_device_state(device_name), "online": False}
 
-    def live_device_status_response(self, device_name: str) -> dict[str, Any]:
-        device = self.app.registry.get(device_name)
-        pending = self.pending_status_operation(device.name)
+        live = self.project_live_device_state(device_name)
+        if live.get("available") and live.get("source") == DeviceStatusSource.LIVE:
+            return {**live, "online": True}
+
+        error = live.get("error") or {}
+        self.presence.mark_offline(
+            device_name, str(error.get("message") or "live status request failed")
+        )
+        return {**self.project_snapshot_device_state(device_name), "online": False}
+
+    def project_live_device_state(self, device_name: str) -> dict[str, Any]:
+        device = self.business.registry.get(device_name)
+        pending = self.find_pending_snapshot_operation(device.name)
         try:
-            return self._live_device_status_response(device, pending)
+            return self._request_live_device_state(device, pending)
         except SmartWateringError as exc:
-            return self.unavailable_status_response(device.name, pending, exc)
+            return self.project_unavailable_device_state(device.name, pending, exc)
 
-    def _live_device_status_response(
+    def _request_live_device_state(
         self,
         device: Any,
         pending: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        previous_timeout = getattr(self.app.api, "timeout_sec", None)
+        previous_timeout = getattr(self.business.api, "timeout_sec", None)
         try:
             if previous_timeout is not None:
-                self.app.api.timeout_sec = LATEST_STATUS_LIVE_TIMEOUT_SEC
-            result = self.app.api.request_json(device.base_url, "/watering", "GET")
+                self.business.api.timeout_sec = LIVE_STATE_REQUEST_TIMEOUT_SEC
+            result = self.business.api.request_json(device.base_url, "/watering", "GET")
             config = result.get("config") if isinstance(result, dict) else None
             if isinstance(config, dict):
-                self.app.registry.confirm_watering_settings(
+                self.business.registry.confirm_watering_settings(
                     device.name, config, time.time()
                 )
-            return self.available_status_response(
+            return self.project_available_device_state(
                 device_name=device.name,
                 source=DeviceStatusSource.LIVE,
-                result=self.raw_status_response(result),
+                result=self.project_device_snapshot(result),
                 result_received_at=time.time(),
                 operation_id=None,
                 pending=pending,
             )
         finally:
             if previous_timeout is not None:
-                self.app.api.timeout_sec = previous_timeout
+                self.business.api.timeout_sec = previous_timeout
 
     @staticmethod
-    def pending_status_operation_fields(
+    def project_pending_snapshot_fields(
         pending: dict[str, Any] | None,
     ) -> dict[str, Any]:
         return {
@@ -276,11 +156,11 @@ class PublicApiService:
             "pending_operation_status": pending["status"] if pending else None,
         }
 
-    def pending_status_operation(self, device_name: str) -> dict[str, Any] | None:
-        return self.app.operations.latest_non_terminal(device_name, "device_status")
+    def find_pending_snapshot_operation(self, device_name: str) -> dict[str, Any] | None:
+        return self.business.operations.latest_non_terminal(device_name, "device_status")
 
     @classmethod
-    def available_status_response(
+    def project_available_device_state(
         cls,
         device_name: str,
         source: DeviceStatusSource,
@@ -299,12 +179,12 @@ class PublicApiService:
             "source": source, "available": True,
             "result": result, "result_received_at": result_received_at,
             "operation_id": operation_id,
-            **cls.pending_status_operation_fields(pending),
+            **cls.project_pending_snapshot_fields(pending),
             "error": None,
         }
 
     @classmethod
-    def unavailable_status_response(
+    def project_unavailable_device_state(
         cls,
         device_name: str,
         pending: dict[str, Any] | None,
@@ -319,7 +199,7 @@ class PublicApiService:
             "result": None,
             "result_received_at": None,
             "operation_id": None,
-            **cls.pending_status_operation_fields(pending),
+            **cls.project_pending_snapshot_fields(pending),
             "error": {
                 "code": error_code,
                 "message": str(exc),
@@ -327,17 +207,8 @@ class PublicApiService:
             },
         }
 
-    @staticmethod
-    def device_to_json(device: Any, pending_devices: set[str] | None = None) -> dict[str, Any]:
-        return {
-            "name": device.name,
-            "controller_name": device.controller_name,
-            "type": device.device_type,
-            "has_pending_operations": device.name in (pending_devices or set()),
-        }
-
-    def water_consumption_response(self, device_name: str) -> dict[str, Any]:
-        device = self.app.registry.get(device_name)
+    def project_water_consumption(self, device_name: str) -> dict[str, Any]:
+        device = self.business.registry.get(device_name)
         if device.device_type != "plant":
             raise PublicApiError(
                 f"device '{device.name}' is not a plant; water consumption "
@@ -404,17 +275,17 @@ class PublicApiService:
                 )
         return {"device": device_name, "days": list(rows.values())[:7]}
 
-    def detected_waterings_response(
+    def project_watering_history(
         self, device_name: str, limit: int, offset: int
     ) -> dict[str, Any]:
-        device = self.app.registry.get(device_name)
+        device = self.business.registry.get(device_name)
         if device.device_type != "plant":
             raise PublicApiError(
                 f"device '{device.name}' is not a plant",
                 404,
                 "not_a_plant",
             )
-        events, has_more = self.app.plant_waterings.list_valid_page(
+        events, has_more = self.business.plant_waterings.list_valid_page(
             device.name, limit, offset
         )
         return {
@@ -433,11 +304,11 @@ class PublicApiService:
             "next_offset": offset + len(events) if has_more else None,
         }
 
-    def invalidate_detected_watering(
+    def delete_watering_history_item(
         self, device_name: str, event_id: int
     ) -> dict[str, Any]:
-        device = self.app.registry.get(device_name)
-        if not self.app.plant_waterings.invalidate(device.name, event_id):
+        device = self.business.registry.get(device_name)
+        if not self.business.plant_waterings.invalidate(device.name, event_id):
             raise PublicApiError(
                 f"detected watering '{event_id}' does not exist",
                 404,
@@ -445,15 +316,15 @@ class PublicApiService:
             )
         return {"id": event_id, "invalid": True}
 
-    def set_detected_watering_fertilized(
+    def set_watering_history_fertilized(
         self, device_name: str, event_id: int, fertilized: bool
     ) -> dict[str, Any]:
-        device = self.app.registry.get(device_name)
+        device = self.business.registry.get(device_name)
         if device.device_type != "plant":
             raise PublicApiError(
                 f"device '{device.name}' is not a plant", 404, "not_a_plant"
             )
-        event = self.app.plant_waterings.set_fertilized(
+        event = self.business.plant_waterings.set_fertilized(
             device.name, event_id, fertilized
         )
         if event is None:
@@ -463,3 +334,4 @@ class PublicApiService:
                 "detected_watering_not_found",
             )
         return {"id": event_id, "fertilized": event["fertilized"]}
+

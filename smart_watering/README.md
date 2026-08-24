@@ -1,4 +1,4 @@
-# Smart Watering Python Module
+﻿# Smart Watering Python Module
 
 The `smart_watering` module is the Python control plane for Smart Watering.
 It provides local CLI operations, persistent SQLite state, queued device writes, operation callbacks and a public JWT-authenticated API.
@@ -6,13 +6,13 @@ Commands below assume they are run from the repository root.
 
 Package layout:
 
-- `application/` — shared business service used by CLI and HTTP API.
-- `domain/` — domain models, repositories, operation queue, and device workers.
-- `infrastructure/` — SQLAlchemy storage and migrations adapter.
-- `interfaces/` — command-line interface.
-- `public_api_app/` and `callback_app/` — ASGI HTTP interfaces.
-- `jobs/` — worker and snapshotter process entry points.
-- `migrations/` — Alembic migration environment and revisions.
+- `application/` â€” shared business service used by CLI and HTTP API.
+- `domain/` â€” domain models, repositories, operation queue, and device workers.
+- `infrastructure/` â€” SQLAlchemy storage and migrations adapter.
+- `interfaces/` â€” command-line interface.
+- `public_api_app/` and `callback_app/` â€” ASGI HTTP interfaces.
+- `jobs/` â€” worker and snapshotter process entry points.
+- `migrations/` â€” Alembic migration environment and revisions.
 
 ## Installation
 
@@ -186,9 +186,9 @@ export SMART_WATERING_WORKER_MAX_WAIT_SEC=900
 ## Snapshotter Node
 
 The snapshotter periodically queues `device_status` reads for all registered devices.
-The worker performs the actual `/watering` requests and stores successful responses as operation results.
-`GET /api/v2/devices/<device>/status/latest` returns those stored results without calling the device directly.
-Use `GET /api/v2/devices/<device>/status/live` for an explicit live read from the ESP.
+The worker performs the actual `/watering` requests and stores successful responses
+as operation results. The v3 card resolver consumes these snapshots internally when
+runtime presence is offline; snapshots are not exposed through a dedicated route.
 
 ```bash
 python -m smart_watering.jobs.snapshotter --interval-sec 300
@@ -227,31 +227,21 @@ Final callback details include values such as `target_reached`, `stop_requested`
 
 ## Public API Node
 
-The public API exposes the `/api/v2` contract used by the mobile client:
-registered devices, supported device types, snapshot and direct-live status, queued
-status snapshots, configuration, sleep control, scale zero/calibration, queue
-management, watering commands, and operation tracking.
+The mobile client uses `/api/v3/auth/...` and the server-driven `/api/v3/devices/...`
+card contract. Device controls and operation queues are projected as card blocks and
+advertised actions; the client does not call operation-oriented routes.
 
-Device-control endpoints:
+Only Android update compatibility remains under v2:
 
-- `GET /api/v2/device-types`
-- `POST /api/v2/devices/{device}/config`
-- `POST /api/v2/devices/{device}/sleep/enable`
-- `POST /api/v2/devices/{device}/sleep/disable`
-- `POST /api/v2/devices/{device}/sleep/interval`
-- `POST /api/v2/devices/{device}/zero`
-- `POST /api/v2/devices/{device}/calibration`
-- `POST /api/v2/devices/{device}/queue/clear`
+- `GET /api/v2/app/latest`
+- `GET /api/v2/app/releases/{version_code}/download`
 
-Writes return operation documents. Submitted values are included in config,
-sleep-interval, and calibration operation responses so clients can distinguish
-current controller values from values that are still queued.
-Queued operations can be tracked by `operation_id`.
-All protected `/api/v2/*` endpoints require a JWT bearer token signed with `HS256`.
+All protected `/api/v3/*` endpoints require a JWT bearer token signed with `HS256`.
 Users and active sessions are stored in SQLite.
 JWT session lifetime is controlled by `SMART_WATERING_PUBLIC_API_SESSION_TTL_SEC` and defaults to one hour.
 Detailed client documentation is available in `smart_watering/PUBLIC_API.md`.
-An OpenAPI schema is available in `smart_watering/public_api.openapi.yaml`.
+The generated OpenAPI schema is available in `smart_watering/public_api.openapi.yaml`;
+tests require it to match the routes registered by FastAPI.
 
 Set a long random secret:
 
@@ -275,76 +265,22 @@ Run the server:
 uvicorn smart_watering.public_api_app.asgi:app --host 0.0.0.0 --port 8081
 ```
 
-Authorize a client:
-
-```bash
-curl -X POST http://127.0.0.1:8081/api/v2/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"mobile-app","password":"your-password"}'
-```
-
-The response contains a bearer token:
-
-```json
-{
-  "token": "<jwt>",
-  "expires_at": 1782750000.0
-}
-```
-
-Revoke the current session:
-
-```bash
-curl -X POST http://127.0.0.1:8081/api/v2/auth/logout \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-Endpoints:
+Current API routes:
 
 ```text
-POST /api/v2/auth/login                       {"username": "mobile-app", "password": "..."}
-POST /api/v2/auth/google                      {"id_token": "<google-id-token>"}
-POST /api/v2/auth/logout
-GET  /api/v2/devices
-GET  /api/v2/devices/<device>/status/latest
-GET  /api/v2/devices/<device>/status/live
-POST /api/v2/devices/<device>/status          {}
-GET  /api/v2/devices/<device>/watering/status
-GET  /api/v2/devices/<device>/watering/last
-POST /api/v2/devices/<device>/watering/start  {"target_g": 200}
-POST /api/v2/devices/<device>/watering/stop   {}
-GET  /api/v2/devices/<device>/operations
-GET  /api/v2/operations/<operation_id>
-GET  /api/v2/operations/<operation_id>/events
-GET  /api/v2/operations/<operation_id>/trace
+POST /api/v3/auth/login
+POST /api/v3/auth/google
+POST /api/v3/auth/logout
+GET  /api/v3/devices
+GET  /api/v3/devices/<device>/card
+GET  /api/v3/devices/<device>/card/blocks/<block>
+POST /api/v3/devices/<device>/actions/<action>
+GET  /api/v2/app/latest
+GET  /api/v2/app/releases/<version_code>/download
 ```
 
-Smoke-test watering through the public API:
-
-```bash
-cp examples/.env.smoke.example examples/.env.smoke
-# edit examples/.env.smoke
-python examples/public-api-watering-smoke-test.py --target-g 1
-```
-
-The smoke test reads `SMART_WATERING_PUBLIC_API_URL` from the environment or from the env file passed with `--env-file`.
-The default env file is `examples/.env.smoke`.
-It does not print the API URL, password, or bearer token.
-
-`watering/status` reads the ESP live and returns:
-
-```json
-{
-  "device": {"name": "main_tank", "type": "tank"},
-  "active": true,
-  "state": "watering",
-  "gap_g": 125.0,
-  "percent_complete": 37.5,
-  "last_operation": {"type": "start", "status": "in_progress"},
-  "source": "live",
-  "available": true
-}
-```
+Only the two Android release routes remain under v2. See `PUBLIC_API.md` and
+`public_api.openapi.yaml` for the current contract.
 
 ## Docker Nodes
 

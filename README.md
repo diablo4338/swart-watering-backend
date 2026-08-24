@@ -7,7 +7,7 @@ The firmware exposes local HTTP endpoints on devices, while the Python services 
 
 - `firmware/` - ESP-IDF firmware for ESP32-C3 controllers. It reads weight through HX711, stores runtime config in NVS, controls pump GPIO for tank devices and exposes the device HTTP API.
 - `smart_watering/` - Python module with CLI, SQLite storage, Alembic migrations, queue worker, callback node, public API and tests.
-- `MyApplication/` - Android client for the public `/api/v2` API.
+- `client/` - Android client for the server-driven `/api/v3` device-card API.
 - `docker/` - Dockerfiles and Compose stack for callback node, worker, public API and an always-running CLI helper container.
 - `scripts/` - host helper wrappers for running CLI commands inside the Compose CLI container.
 
@@ -15,7 +15,8 @@ The firmware exposes local HTTP endpoints on devices, while the Python services 
 
 - Firmware details: [firmware/README.md](firmware/README.md)
 - Python services and APIs: [smart_watering/README.md](smart_watering/README.md)
-- Android app build/env setup: [MyApplication/README.md](MyApplication/README.md)
+- Android app build/env setup: [client/README.md](client/README.md)
+- Device-card architecture: [docs/DEVICE_CARD_ARCHITECTURE.md](docs/DEVICE_CARD_ARCHITECTURE.md)
 
 ## Runtime Flow
 
@@ -23,7 +24,8 @@ The firmware exposes local HTTP endpoints on devices, while the Python services 
 2. Config and watering writes are queued because ESP devices may be online only for a short wake window.
 3. The worker drains queued writes to devices.
 4. Devices call back to the callback node with operation lifecycle events.
-5. The public API exposes device discovery, type metadata, status reads, queued device-control commands, watering, and operation tracking behind JWT-backed sessions.
+5. The backend projects device workflow state into versioned card blocks and server-advertised actions.
+6. The Android client renders those blocks and polls only the visible blocks according to their server-provided refresh policy; internal operations never cross the mobile API boundary.
 
 ## Environment Variables
 
@@ -50,8 +52,8 @@ Public API and auth:
 | `SMART_WATERING_PUBLIC_API_JWT_SECRET` | none, required for public API | public API | Secret used to sign HS256 session JWTs. Set a long random value in every non-test deployment. |
 | `SMART_WATERING_PUBLIC_API_SESSION_TTL_SEC` | `3600` | public API | Session token lifetime in seconds. |
 | `SMART_WATERING_GOOGLE_WEB_CLIENT_ID` | empty | public API, Android app | Google OAuth Web client ID. Required to enable Google Sign-In. |
-| `SMART_WATERING_GOOGLE_ALLOWED_EMAILS` | empty | public API | Comma-separated allowlist of Google account emails accepted by `/api/v2/auth/google`. |
-| `SMART_WATERING_GOOGLE_ALLOWED_DOMAINS` | empty | public API | Comma-separated allowlist of Google Workspace domains accepted by `/api/v2/auth/google`. Use this or `SMART_WATERING_GOOGLE_ALLOWED_EMAILS` when Google Sign-In is enabled. |
+| `SMART_WATERING_GOOGLE_ALLOWED_EMAILS` | empty | public API | Comma-separated allowlist of Google account emails accepted by `/api/v3/auth/google`. |
+| `SMART_WATERING_GOOGLE_ALLOWED_DOMAINS` | empty | public API | Comma-separated allowlist of Google Workspace domains accepted by `/api/v3/auth/google`. Use this or `SMART_WATERING_GOOGLE_ALLOWED_EMAILS` when Google Sign-In is enabled. |
 | `SMART_WATERING_PROMETHEUS_URL` | `http://127.0.0.1:9090` | public API, watering detector, CLI | Prometheus server used for plant statistics and detected watering history. |
 | `SMART_WATERING_STATISTICS_TIMEZONE` | `Europe/Berlin` | public API | Calendar timezone used for day (08:00–20:00) and night (20:00–08:00) periods. |
 

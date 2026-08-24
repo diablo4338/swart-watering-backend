@@ -9,7 +9,7 @@ from ..errors import PublicApiError
 from .. import security
 
 
-router = APIRouter(prefix="/api/v2/auth", tags=["auth"])
+router = APIRouter(prefix="/api/v3/auth", tags=["auth"])
 
 
 @router.post("/login")

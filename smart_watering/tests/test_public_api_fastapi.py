@@ -1,14 +1,17 @@
-import json
+﻿import json
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
+import yaml
 
 from smart_watering.application.service import SmartWateringService
 from smart_watering.infrastructure.database import DatabaseError
 from smart_watering.public_api_app import create_app
 from smart_watering.public_api_app.runtime import ApiRuntime, ApiSettings
+from smart_watering.public_api_app.service import DeviceStateProjectionService
 
 
 def make_client(temp_dir: str) -> tuple[TestClient, SmartWateringService]:
@@ -77,18 +80,18 @@ def test_fastapi_health_and_auth_contract() -> None:
         cli.auth.add_user("client", "secret-password")
 
         assert client.get("/healthz").json() == {"status": "ok"}
-        unauthorized = client.get("/api/v2/devices")
+        unauthorized = client.get("/api/v3/devices")
         assert unauthorized.status_code == 401
         assert unauthorized.json()["error"] == "missing_token"
 
         login = client.post(
-            "/api/v2/auth/login",
+            "/api/v3/auth/login",
             json={"username": "client", "password": "secret-password"},
         )
         assert login.status_code == 200
         token = login.json()["token"]
         devices = client.get(
-            "/api/v2/devices",
+            "/api/v3/devices",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert devices.status_code == 200
@@ -100,7 +103,7 @@ def test_database_errors_return_safe_service_unavailable_response() -> None:
         client, cli = make_client(temp_dir)
         cli.auth.add_user("client", "secret-password")
         token = client.post(
-            "/api/v2/auth/login",
+            "/api/v3/auth/login",
             json={"username": "client", "password": "secret-password"},
         ).json()["token"]
 
@@ -109,7 +112,7 @@ def test_database_errors_return_safe_service_unavailable_response() -> None:
 
         cli.auth.require_active_session = fail_session_lookup
         response = client.get(
-            "/api/v2/devices",
+            "/api/v3/devices",
             headers={"Authorization": f"Bearer {token}"},
         )
 
@@ -121,392 +124,169 @@ def test_database_errors_return_safe_service_unavailable_response() -> None:
         assert "SELECT secret" not in response.text
 
 
-def test_fastapi_registers_documented_v2_routes() -> None:
+def test_only_android_release_routes_remain_on_v2() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         client, _cli = make_client(temp_dir)
         paths = client.get("/openapi.json").json()["paths"]
 
-        assert "/api/v2/devices/{device_name}/water-consumption" in paths
-        assert "/api/v2/devices/{device_name}/watering/start" in paths
-        assert "/api/v2/devices/{device_name}/operations" in paths
-        assert "/api/v2/operations" not in paths
-        assert "/api/v2/operations/{operation_id}/events" in paths
-        assert "/api/v2/operations/{operation_id}/trace" in paths
-        assert "/api/v2/devices/{device_name}/detected-waterings" in paths
-        assert (
-            "/api/v2/devices/{device_name}/detected-waterings/{event_id}" in paths
-        )
-
-
-def test_device_rename_to_existing_name_returns_conflict() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        client, cli = make_client(temp_dir)
-        cli.auth.add_user("client", "secret-password")
-        cli.registry.add("10.0.0.1", "plant", "plant_1")
-        cli.registry.add("10.0.0.2", "plant", "plant_2")
-        token = client.post(
-            "/api/v2/auth/login",
-            json={"username": "client", "password": "secret-password"},
-        ).json()["token"]
-
-        response = client.put(
-            "/api/v2/devices/plant_1/backend-name",
-            json={"name": "plant_2"},
-            headers={"Authorization": f"Bearer {token}"},
-        )
-
-        assert response.status_code == 409
-        assert response.json()["error"] == "device_name_conflict"
-
-
-def test_device_name_availability_allows_current_owner_and_rejects_other_device() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        client, cli = make_client(temp_dir)
-        cli.auth.add_user("client", "secret-password")
-        cli.registry.add("10.0.0.1", "plant", "plant_1")
-        cli.registry.add("10.0.0.2", "plant", "plant_2")
-        token = client.post(
-            "/api/v2/auth/login",
-            json={"username": "client", "password": "secret-password"},
-        ).json()["token"]
-        headers = {"Authorization": f"Bearer {token}"}
-
-        own = client.get(
-            "/api/v2/device-name-availability",
-            params={"name": "plant_1", "current_name": "plant_1"},
-            headers=headers,
-        )
-        occupied = client.get(
-            "/api/v2/device-name-availability",
-            params={"name": "plant_2", "current_name": "plant_1"},
-            headers=headers,
-        )
-        free = client.get(
-            "/api/v2/device-name-availability",
-            params={"name": "fern", "current_name": "plant_1"},
-            headers=headers,
-        )
-
-        assert own.json()["available"] is True
-        assert occupied.json()["available"] is False
-        assert free.json()["available"] is True
-
-
-def test_backend_name_update_returns_conflict_and_does_not_change_controller_name() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        client, cli = make_client(temp_dir)
-        cli.auth.add_user("client", "secret-password")
-        cli.registry.add("10.0.0.1", "plant", "fern")
-        cli.registry.add("10.0.0.2", "plant", "cactus")
-        token = client.post(
-            "/api/v2/auth/login",
-            json={"username": "client", "password": "secret-password"},
-        ).json()["token"]
-        headers = {"Authorization": f"Bearer {token}"}
-
-        conflict = client.put(
-            "/api/v2/devices/fern/backend-name", json={"name": "cactus"}, headers=headers
-        )
-        renamed = client.put(
-            "/api/v2/devices/fern/backend-name", json={"name": "office"}, headers=headers
-        )
-
-        assert conflict.status_code == 409
-        assert conflict.json()["error"] == "device_name_conflict"
-        assert renamed.status_code == 200
-        assert renamed.json()["name"] == "office"
-        assert renamed.json()["controller_name"] == "fern"
-
-
-def test_backend_name_is_not_accepted_as_controller_config() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        client, cli = make_client(temp_dir)
-        cli.auth.add_user("client", "secret-password")
-        cli.registry.add("10.0.0.1", "plant", "fern")
-        token = client.post(
-            "/api/v2/auth/login",
-            json={"username": "client", "password": "secret-password"},
-        ).json()["token"]
-
-        response = client.post(
-            "/api/v2/devices/fern/config",
-            json={"backend_name": "office"},
-            headers={"Authorization": f"Bearer {token}"},
-        )
-
-        assert response.status_code == 400
-        assert response.json()["error"] == "invalid_config"
-        assert cli.registry.get("fern").name == "fern"
-        assert cli.queue.list() == []
-
-
-def test_mutating_request_with_idempotency_key_replays_original_response() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        client, cli = make_client(temp_dir)
-        cli.auth.add_user("client", "secret-password")
-        cli.registry.add("10.0.0.1", "plant", "plant_1")
-        token = client.post(
-            "/api/v2/auth/login",
-            json={"username": "client", "password": "secret-password"},
-        ).json()["token"]
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Idempotency-Key": "018f927c-5c9a-7c14-a8e0-88d00bca0177",
+        assert {path for path in paths if path.startswith("/api/v2/")} == {
+            "/api/v2/app/latest",
+            "/api/v2/app/releases/{version_code}/download",
         }
-        cli.queue_device_status("plant_1")
+        assert "/api/v3/auth/login" in paths
+        assert "/api/v3/auth/google" in paths
+        assert "/api/v3/auth/logout" in paths
+        assert client.post("/api/v2/auth/login", json={}).status_code == 404
+        assert client.get("/api/v2/devices").status_code == 404
 
-        first = client.post(
-            "/api/v2/devices/plant_1/queue/clear", json={}, headers=headers
+
+def test_checked_in_openapi_matches_registered_routes() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        client, _cli = make_client(temp_dir)
+        checked_in = yaml.safe_load(
+            (Path(__file__).parents[1] / "public_api.openapi.yaml").read_text(
+                encoding="utf-8"
+            )
         )
-        replay = client.post(
-            "/api/v2/devices/plant_1/queue/clear", json={}, headers=headers
-        )
 
-        assert first.status_code == 200
-        assert first.json() == {"cleared": 1}
-        assert replay.status_code == 200
-        assert replay.json() == first.json()
-        assert replay.headers["Idempotency-Replayed"] == "true"
+        assert checked_in == client.get("/openapi.json").json()
 
 
-def test_idempotency_key_cannot_be_reused_for_another_request() -> None:
+def test_v3_device_card_exposes_server_driven_blocks_and_actions() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         client, cli = make_client(temp_dir)
         cli.auth.add_user("client", "secret-password")
-        cli.registry.add("10.0.0.1", "plant", "plant_1")
+        cli.registry.add("10.0.0.1", "plant", "avocado")
         token = client.post(
-            "/api/v2/auth/login",
+            "/api/v3/auth/login",
             json={"username": "client", "password": "secret-password"},
         ).json()["token"]
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Idempotency-Key": "018f927c-5c9a-7c14-a8e0-88d00bca0178",
+        headers = {"Authorization": f"Bearer {token}"}
+
+        devices = client.get("/api/v3/devices", headers=headers)
+        with (
+            patch.object(
+                DeviceStateProjectionService,
+                "project_watering_history",
+                side_effect=AssertionError("initial card must not load history"),
+            ),
+        ):
+            card = client.get("/api/v3/devices/avocado/card", headers=headers)
+
+        assert devices.status_code == 200
+        assert devices.json()["devices"] == [{
+            "id": "avocado",
+            "name": "avocado",
+            "device_type": "plant",
+            "card_profile": "plant.v1",
+            "card_href": "/api/v3/devices/avocado/card",
+        }]
+        assert card.status_code == 200
+        blocks = {block["id"]: block for block in card.json()["blocks"]}
+        assert list(blocks) == [
+            "overview", "control", "watering_parameters", "watering_history",
+            "operation_queue",
+        ]
+        controls = {
+            control["id"]: control
+            for control in blocks["control"]["schema"]["controls"]
         }
-
-        first = client.post(
-            "/api/v2/devices/plant_1/queue/clear", json={}, headers=headers
-        )
-        conflict = client.post(
-            "/api/v2/devices/plant_1/status", json={}, headers=headers
-        )
-
-        assert first.status_code == 200
-        assert conflict.status_code == 409
-        assert conflict.json()["error"] == "idempotency_key_conflict"
-
-
-def test_watering_parameters_are_confirmed_and_timestamped_per_field() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        client, cli = make_client(temp_dir)
-        cli.auth.add_user("client", "secret-password")
-        cli.registry.add("10.0.0.1", "plant", "plant_1")
-        token = client.post(
-            "/api/v2/auth/login",
-            json={"username": "client", "password": "secret-password"},
-        ).json()["token"]
-        headers = {"Authorization": f"Bearer {token}"}
-        endpoint = "/api/v2/devices/plant_1/watering-parameters"
-
-        initial = client.get(endpoint, headers=headers)
-        queued = client.put(
-            endpoint,
-            json={"dry_weight_g": 120, "wet_weight_g": 500},
-            headers=headers,
-        )
-
-        assert initial.status_code == 200
-        assert initial.json()["dry_weight_g"] is None
-        assert queued.status_code == 200
-        assert queued.json()["dry_weight_g"] is None
-        assert queued.json()["dry_weight_updated_at"] is None
-
-        cli.operations.event(queued.json()["operation_id"], "success", "config_updated")
-        confirmed = client.get(endpoint, headers=headers).json()
-        dry_updated_at = confirmed["dry_weight_updated_at"]
-        wet_updated_at = confirmed["wet_weight_updated_at"]
-
-        assert confirmed["dry_weight_g"] == 120
-        assert dry_updated_at is not None
-        assert confirmed["wet_weight_g"] == 500
-        assert wet_updated_at is not None
-
-        wet_only = client.put(endpoint, json={"wet_weight_g": 510}, headers=headers)
-        cli.operations.event(wet_only.json()["operation_id"], "success", "config_updated")
-        updated = client.get(endpoint, headers=headers).json()
-
-        assert updated["dry_weight_g"] == 120
-        assert updated["dry_weight_updated_at"] == dry_updated_at
-        assert updated["wet_weight_g"] == 510
-        assert updated["wet_weight_updated_at"] >= wet_updated_at
-
-
-def test_watering_parameters_reject_invalid_or_empty_updates() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        client, cli = make_client(temp_dir)
-        cli.auth.add_user("client", "secret-password")
-        cli.registry.add("10.0.0.1", "plant", "plant_1")
-        token = client.post(
-            "/api/v2/auth/login",
-            json={"username": "client", "password": "secret-password"},
-        ).json()["token"]
-        headers = {"Authorization": f"Bearer {token}"}
-        endpoint = "/api/v2/devices/plant_1/watering-parameters"
-
-        assert client.put(endpoint, json={}, headers=headers).status_code == 400
-        assert client.put(
-            endpoint, json={"dry_weight_g": 1.5}, headers=headers
-        ).status_code == 400
-        assert client.put(
-            endpoint,
-            json={"watering_loss_threshold_percent": 101},
-            headers=headers,
-        ).status_code == 400
-
-
-def test_detected_watering_history_soft_delete() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        client, cli = make_client(temp_dir)
-        cli.auth.add_user("client", "secret-password")
-        cli.registry.add("10.0.0.1", "plant", "plant_1")
-        token = client.post(
-            "/api/v2/auth/login",
-            json={"username": "client", "password": "secret-password"},
-        ).json()["token"]
-        headers = {"Authorization": f"Bearer {token}"}
-        event, _created = cli.plant_waterings.upsert_detected(
-            "plant_1",
-            {
-                "event_start_at": 100.0,
-                "occurred_at": 200.0,
-                "weight_before_g": 100.0,
-                "weight_after_g": 130.0,
-                "amount_g": 30.0,
-            },
-        )
+        assert controls["sleep_enabled"]["control_type"] == "action_toggle.v1"
+        assert controls["capture_zero"]["preset"] == "zero_capture_hold.v1"
+        assert blocks["control"]["data"] == {}
+        assert blocks["watering_parameters"]["data"] == {}
+        assert blocks["watering_history"]["data"] == {}
+        assert blocks["operation_queue"]["data"] == {"items": []}
 
         history = client.get(
-            "/api/v2/devices/plant_1/detected-waterings", headers=headers
-        )
-        removed = client.delete(
-            f"/api/v2/devices/plant_1/detected-waterings/{event['id']}",
+            "/api/v3/devices/avocado/card/blocks/watering_history",
             headers=headers,
         )
-        empty_history = client.get(
-            "/api/v2/devices/plant_1/detected-waterings", headers=headers
-        )
-
         assert history.status_code == 200
-        assert history.json()["waterings"][0]["amount_g"] == 30.0
-        assert removed.json() == {"id": event["id"], "invalid": True}
-        assert empty_history.json()["waterings"] == []
+        assert history.json()["block"]["data"] == {"items": [], "next_offset": None}
 
+        runtime = client.app.state.runtime
+        runtime.presence.mark_offline("avocado", "test offline")
+        overview = client.get(
+            "/api/v3/devices/avocado/card/blocks/overview",
+            headers=headers,
+        )
+        assert overview.status_code == 200
+        assert overview.json()["block"]["data"]["status"]["code"] == "offline"
+        assert overview.json()["block"]["data"]["source"] == "none"
 
-def test_detected_watering_history_is_paginated() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        client, cli = make_client(temp_dir)
-        cli.auth.add_user("client", "secret-password")
-        cli.registry.add("10.0.0.1", "plant", "plant_1")
-        token = client.post(
-            "/api/v2/auth/login",
-            json={"username": "client", "password": "secret-password"},
-        ).json()["token"]
-        headers = {"Authorization": f"Bearer {token}"}
-        for index in range(3):
-            cli.plant_waterings.upsert_detected(
-                "plant_1",
-                {
-                    "event_start_at": 100.0 + index,
-                    "occurred_at": 200.0 + index,
-                    "weight_before_g": 100.0,
-                    "weight_after_g": 130.0,
-                    "amount_g": 30.0,
+        runtime.presence.mark_online("avocado")
+        with patch.object(
+            DeviceStateProjectionService,
+            "project_live_device_state",
+            return_value={
+                "available": True,
+                "source": "live",
+                "result": {
+                    "weight": {"gross_weight_g": 1234},
+                    "config": {
+                        "dry_weight_g": 1000,
+                        "wet_weight_g": 1500,
+                        "watering_loss_threshold_percent": 10,
+                    },
                 },
-            )
-
-        first = client.get(
-            "/api/v2/devices/plant_1/detected-waterings?limit=2",
-            headers=headers,
-        ).json()
-        second = client.get(
-            f"/api/v2/devices/plant_1/detected-waterings"
-            f"?limit=2&offset={first['next_offset']}",
-            headers=headers,
-        ).json()
-
-        assert [item["occurred_at"] for item in first["waterings"]] == [202.0, 201.0]
-        assert first["next_offset"] == 2
-        assert [item["occurred_at"] for item in second["waterings"]] == [200.0]
-        assert second["next_offset"] is None
-
-
-def test_detected_watering_can_be_marked_fertilized() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        client, cli = make_client(temp_dir)
-        cli.auth.add_user("client", "secret-password")
-        cli.registry.add("10.0.0.1", "plant", "plant_1")
-        token = client.post(
-            "/api/v2/auth/login",
-            json={"username": "client", "password": "secret-password"},
-        ).json()["token"]
-        headers = {"Authorization": f"Bearer {token}"}
-        event, _created = cli.plant_waterings.upsert_detected(
-            "plant_1",
-            {
-                "event_start_at": 100.0,
-                "occurred_at": 200.0,
-                "weight_before_g": 100.0,
-                "weight_after_g": 130.0,
-                "amount_g": 30.0,
+                "result_received_at": 123.0,
             },
-        )
+        ):
+            live_overview = client.get(
+                "/api/v3/devices/avocado/card/blocks/overview",
+                headers=headers,
+            )
+        live_data = live_overview.json()["block"]["data"]
+        assert live_data["status"]["code"] == "online"
+        assert live_data["source"] == "live"
+        assert live_data["primary_value"]["value"] == 184
+        runtime.presence.mark_offline("avocado", "test offline")
 
-        before = client.get(
-            "/api/v2/devices/plant_1/detected-waterings", headers=headers
-        ).json()["waterings"][0]
-        updated = client.put(
-            f"/api/v2/devices/plant_1/detected-waterings/{event['id']}/fertilized",
-            json={"fertilized": True},
+        action = client.post(
+            "/api/v3/devices/avocado/actions/set-sleep",
+            json={"enabled": True},
             headers=headers,
         )
-        after = client.get(
-            "/api/v2/devices/plant_1/detected-waterings", headers=headers
-        ).json()["waterings"][0]
-        cleared = client.put(
-            f"/api/v2/devices/plant_1/detected-waterings/{event['id']}/fertilized",
-            json={"fertilized": False},
+
+        assert action.status_code == 200
+        assert action.json()["accepted"] is True
+        assert cli.operations.latest_non_terminal("avocado", "sleep_enable") is not None
+        interval_action = client.post(
+            "/api/v3/devices/avocado/actions/set-sleep-interval",
+            json={"minutes": 17},
             headers=headers,
         )
+        assert interval_action.status_code == 200
+        queue = client.get(
+            "/api/v3/devices/avocado/card/blocks/operation_queue",
+            headers=headers,
+        )
+        assert queue.status_code == 200
+        queued_item = queue.json()["block"]["data"]["items"][0]
+        assert queued_item["type"] == "sleep_interval"
+        assert queued_item["payload"] == "17 min"
+        assert queued_item["actions"][0]["label"] == "Delete"
 
-        assert before["fertilized"] is False
-        assert updated.status_code == 200
-        assert updated.json() == {"id": event["id"], "fertilized": True}
-        assert after["fertilized"] is True
-        assert cleared.json() == {"id": event["id"], "fertilized": False}
+        cleared = client.post(
+            "/api/v3/devices/avocado/actions/cancel-operation",
+            json={"operation_id": queued_item["id"]},
+            headers=headers,
+        )
+        assert cleared.status_code == 200
+        remaining = cli.operations.details_from_operations(
+            cli.operations.list_non_terminal("avocado")
+        )
+        assert [operation["type"] for operation in remaining] == ["sleep_enable"]
+        updated_control = next(
+            block for block in action.json()["card"]["blocks"]
+            if block["id"] == "control"
+        )
+        sleep = next(
+            control for control in updated_control["schema"]["controls"]
+            if control["id"] == "sleep_enabled"
+        )
+        assert sleep["enabled"] is False
 
 
-def test_fastapi_operations_filter_by_device() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        client, cli = make_client(temp_dir)
-        cli.auth.add_user("client", "secret-password")
-        token = client.post(
-            "/api/v2/auth/login",
-            json={"username": "client", "password": "secret-password"},
-        ).json()["token"]
-        headers = {"Authorization": f"Bearer {token}"}
 
-        first_id = cli.operations.create("plant_1", "device_status", {})
-        cli.operations.create("plant_2", "device_status", {})
-
-        response = client.get("/api/v2/devices/plant_1/operations", headers=headers)
-
-        assert response.status_code == 200
-        assert response.json()["operations"] == [
-            {
-                "operation_id": first_id,
-                "device": "plant_1",
-                "type": "device_status",
-                "status": "queued",
-                "updated_at": response.json()["operations"][0]["updated_at"],
-                "finished_at": None,
-            }
-        ]

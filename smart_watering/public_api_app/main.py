@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from time import perf_counter
 
 from fastapi import FastAPI, Request
@@ -10,16 +11,25 @@ from smart_watering.infrastructure.database import DatabaseError
 
 from .errors import PublicApiError
 from .idempotency import IdempotencyMiddleware
-from .routers import app_releases, auth, devices, operations
+from .routers import app_releases, auth, cards
 from .runtime import ApiRuntime
 
 
 def create_app(runtime: ApiRuntime) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        runtime.presence_monitor.start()
+        try:
+            yield
+        finally:
+            await runtime.presence_monitor.stop()
+
     app = FastAPI(
         title="Smart Watering Public API",
-        version="2",
+        version="3.0.0",
         docs_url="/docs",
         redoc_url=None,
+        lifespan=lifespan,
     )
     app.state.runtime = runtime
 
@@ -92,7 +102,6 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
 
     app.include_router(auth.router)
     app.include_router(app_releases.router)
-    app.include_router(devices.router)
-    app.include_router(operations.router)
+    app.include_router(cards.router)
     app.add_middleware(IdempotencyMiddleware, store=runtime.business.store)
     return app

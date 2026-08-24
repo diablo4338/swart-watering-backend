@@ -25,7 +25,7 @@ class IdempotencyMiddleware:
         if (
             scope["type"] != "http"
             or scope["method"] not in IDEMPOTENT_METHODS
-            or not scope["path"].startswith("/api/v2/devices/")
+            or not scope["path"].startswith("/api/v3/devices/")
         ):
             await self.app(scope, receive, send)
             return
