@@ -13,7 +13,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, column_property, mapped_column, sessionmaker
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import NullPool, QueuePool
 
 
 class DatabaseError(RuntimeError):
@@ -54,6 +54,7 @@ class DeviceWateringSettingsRecord(Base):
 
 class OperationRecord(Base):
     __tablename__ = "operations"
+    __table_args__ = (Index("ix_operations_status_updated_at", "status", "updated_at"),)
 
     operation_id: Mapped[str] = mapped_column(String, primary_key=True)
     correlation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
@@ -189,10 +190,16 @@ class PlantWateringEventRecord(Base):
 
 
 class DatabaseStore:
-    def __init__(self, db_path: str, migrations_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        db_path: str,
+        migrations_dir: str | None = None,
+        reuse_connections: bool = False,
+    ) -> None:
         self.db_path = db_path
         package_dir = os.path.dirname(os.path.dirname(__file__))
         self.migrations_dir = migrations_dir or os.path.join(package_dir, "migrations")
+        self.reuse_connections = reuse_connections
         self._engine: Engine | None = None
         self._session_factory: sessionmaker[Session] | None = None
 
@@ -241,7 +248,7 @@ class DatabaseStore:
                 self._engine = create_engine(
                     f"sqlite:///{self.db_path}",
                     connect_args={"check_same_thread": False, "timeout": 30},
-                    poolclass=NullPool,
+                    poolclass=QueuePool if self.reuse_connections else NullPool,
                     future=True,
                 )
                 event.listen(self._engine, "connect", self._configure_sqlite_connection)

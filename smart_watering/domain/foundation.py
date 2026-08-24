@@ -29,6 +29,7 @@ DEFAULT_NODE_PORT = 8080
 NODE_WORKER_IDLE_INTERVAL_SEC_ENV = "SMART_WATERING_WORKER_IDLE_INTERVAL_SEC"
 DEFAULT_NODE_WORKER_IDLE_INTERVAL_SEC = 1
 NODE_WORKER_IDLE_INTERVAL_SEC = DEFAULT_NODE_WORKER_IDLE_INTERVAL_SEC
+WORKER_STALE_CHECK_INTERVAL_SEC = 60
 RETRYABLE_COMMANDS = frozenset({
     ("POST", "/config"),
     ("POST", "/watering/start"),
@@ -200,8 +201,8 @@ class UserSession:
 
 
 class SQLiteStore(DatabaseStore):
-    def __init__(self, db_path: str | None = None) -> None:
-        super().__init__(db_path or resolve_db_path())
+    def __init__(self, db_path: str | None = None, reuse_connections: bool = False) -> None:
+        super().__init__(db_path or resolve_db_path(), reuse_connections=reuse_connections)
 
     @contextmanager
     def session(self) -> Iterator[Session]:

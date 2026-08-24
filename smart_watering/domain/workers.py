@@ -20,6 +20,7 @@ from .foundation import (
     OP_TIMEOUT,
     RETRYABLE_COMMANDS,
     WORKER_PID_PATH,
+    WORKER_STALE_CHECK_INTERVAL_SEC,
     DeviceHttpError,
     QueuedCommand,
     RetryableDeviceApiError,
@@ -421,24 +422,30 @@ class DeviceWorkerSupervisor:
         BackgroundWorker.log(
             f"started pid={os.getpid()} mode=per-device idle_interval={idle_interval_sec}s"
         )
+        next_stale_check_at = 0.0
         try:
             while True:
-                self.start_pending_workers()
+                now = time.monotonic()
+                check_stale = now >= next_stale_check_at
+                self.start_pending_workers(check_stale=check_stale)
+                if check_stale:
+                    next_stale_check_at = now + WORKER_STALE_CHECK_INTERVAL_SEC
                 time.sleep(idle_interval_sec)
         finally:
             BackgroundWorker.log(f"stopped pid={os.getpid()}")
             self.state.clear()
 
-    def start_pending_workers(self) -> None:
+    def start_pending_workers(self, check_stale: bool = True) -> None:
         with self._lock:
             self._threads = {
                 device_name: thread
                 for device_name, thread in self._threads.items()
                 if thread.is_alive()
             }
-            timed_out = self.operations.timeout_stale_controller_results(self.max_wait_sec)
-            if timed_out:
-                BackgroundWorker.log(f"timed out stale controller results count={timed_out}")
+            if check_stale:
+                timed_out = self.operations.timeout_stale_controller_results(self.max_wait_sec)
+                if timed_out:
+                    BackgroundWorker.log(f"timed out stale controller results count={timed_out}")
             device_names = self.queue.pending_device_names()
             if not device_names:
                 if not self._was_idle:

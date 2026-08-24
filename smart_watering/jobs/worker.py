@@ -18,7 +18,7 @@ from smart_watering.domain import (
 
 def main() -> int:
     try:
-        store = SQLiteStore()
+        store = SQLiteStore(reuse_connections=True)
         store.init_schema()
         worker = DeviceWorkerSupervisor(
             DeviceApiClient(REQUEST_TIMEOUT_SEC),
