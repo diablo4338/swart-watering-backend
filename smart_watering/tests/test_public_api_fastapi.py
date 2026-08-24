@@ -195,6 +195,10 @@ def test_v3_device_card_exposes_server_driven_blocks_and_actions() -> None:
         assert controls["capture_zero"]["preset"] == "zero_capture_hold.v1"
         assert blocks["control"]["data"] == {}
         assert blocks["watering_parameters"]["data"] == {}
+        assert {
+            control["id"]
+            for control in blocks["watering_parameters"]["schema"]["controls"]
+        } >= {"save_watering_parameters"}
         assert blocks["watering_history"]["data"] == {}
         assert blocks["operation_queue"]["data"] == {"items": []}
 
@@ -212,6 +216,8 @@ def test_v3_device_card_exposes_server_driven_blocks_and_actions() -> None:
             headers=headers,
         )
         assert overview.status_code == 200
+        assert isinstance(overview.json()["card_revision"], int)
+        assert "card_calculate_revision" not in overview.json()
         assert overview.json()["block"]["data"]["status"]["code"] == "offline"
         assert overview.json()["block"]["data"]["source"] == "none"
 

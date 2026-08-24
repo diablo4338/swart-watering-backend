@@ -10,6 +10,7 @@ Status: v3 baseline implemented; breaking changes are allowed.
 - `POST /api/v3/devices/{device}/actions/{action}` executes an advertised action and returns a new projection.
 - `/api/v3/auth/...` owns login, Google login, and logout for the current client.
 - Android renders `device_overview`, `dynamic_form`, `history`, `operation_queue`, and `progress` through a native control registry.
+- In the plant profile, the operation queue is rendered after the expandable history/control content and before overview statistics.
 - Android has no operation models, operation endpoints, status interpretation, recovery loop, or operation polling.
 - Overview statistics are cached server-side for five minutes; per-block polling does not reload history.
 - `/healthz` and `/api/v2/app/...` release metadata/download routes remain compatible.

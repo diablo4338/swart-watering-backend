@@ -92,7 +92,7 @@ class DeviceCardService:
         block = builders[block_id]()
         return {
             "device_id": device.name,
-            "card_calculate_revision": self._calculate_revision(status, operations),
+            "card_revision": self._calculate_revision(status, operations),
             "block": block,
         }
 
@@ -529,7 +529,7 @@ class DeviceCardService:
             {"kind": "field", "id": "wet_weight_g", "label": "Wet weight", "control_type": "number_input.v1", "value_type": "integer", "unit": "g", "constraints": {"min": 0}},
             {"kind": "field", "id": "watering_loss_threshold_percent", "label": "Water loss threshold", "control_type": "number_input.v1", "value_type": "integer", "unit": "%", "constraints": {"min": 0, "max": 100}},
             {
-                "kind": "action", "id": "save_validate_watering_parameters", "label": "Save",
+                "kind": "action", "id": "save_watering_parameters", "label": "Save",
                 "control_type": "button.v1", "enabled": pending is None,
                 "request": self._advertised_action_request(
                     f"/api/v3/devices/{device.name}/actions/set-watering-parameters",
@@ -797,7 +797,7 @@ class DeviceCardService:
                 raise PublicApiError(f"invalid {key}", 400, f"invalid_{key}")
             values[key] = value
         if not values:
-            raise PublicApiError("watering parameters are required", 400, "invalid_validate_watering_parameters")
+            raise PublicApiError("watering parameters are required", 400, "invalid_watering_parameters")
         return values
 
 
