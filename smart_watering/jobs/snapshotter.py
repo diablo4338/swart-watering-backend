@@ -9,7 +9,7 @@ from smart_watering.domain import SmartWateringError
 
 
 SNAPSHOT_INTERVAL_SEC_ENV = "SMART_WATERING_SNAPSHOT_INTERVAL_SEC"
-DEFAULT_SNAPSHOT_INTERVAL_SEC = 300
+DEFAULT_SNAPSHOT_INTERVAL_SEC = 60
 
 
 def parse_positive_int(raw_value: str, name: str) -> int:
@@ -66,7 +66,7 @@ class StatusSnapshotScheduler:
 
 class SnapshotterApp:
     def __init__(self, db_path: str | None = None) -> None:
-        self.app = SmartWateringService(db_path)
+        self.app = SmartWateringService(db_path, reuse_connections=True)
 
     @staticmethod
     def build_parser() -> argparse.ArgumentParser:

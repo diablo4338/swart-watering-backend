@@ -87,7 +87,7 @@ def main() -> int:
     try:
         args = build_parser().parse_args()
         scheduler = WateringDetectionScheduler(
-            SmartWateringService(),
+            SmartWateringService(reuse_connections=True),
             os.environ.get(PROMETHEUS_URL_ENV, DEFAULT_PROMETHEUS_URL),
             args.interval_sec,
             args.lookback_hours,

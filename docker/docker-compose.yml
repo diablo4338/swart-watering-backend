@@ -39,7 +39,7 @@ services:
     entrypoint: ["python", "-m", "smart_watering.jobs.snapshotter"]
     environment:
       <<: *common-environment
-      SMART_WATERING_SNAPSHOT_INTERVAL_SEC: ${SMART_WATERING_SNAPSHOT_INTERVAL_SEC:-300}
+      SMART_WATERING_SNAPSHOT_INTERVAL_SEC: ${SMART_WATERING_SNAPSHOT_INTERVAL_SEC:-60}
 
   watering-detector:
     <<: *python-service

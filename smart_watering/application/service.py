@@ -23,8 +23,12 @@ MAX_SLEEP_INTERVAL_MIN = 50
 class SmartWateringService:
     """Shared application layer used by every delivery adapter."""
 
-    def __init__(self, db_path: str | None = None) -> None:
-        self.store = SQLiteStore(db_path)
+    def __init__(
+        self,
+        db_path: str | None = None,
+        reuse_connections: bool = False,
+    ) -> None:
+        self.store = SQLiteStore(db_path, reuse_connections=reuse_connections)
         self.store.init_schema()
         self.registry = DeviceRegistry(self.store)
         self.auth = AuthStore(self.store)

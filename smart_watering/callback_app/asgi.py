@@ -4,6 +4,6 @@ from .main import create_app
 from .service import CallbackService
 
 
-store = SQLiteStore()
+store = SQLiteStore(reuse_connections=True)
 store.init_schema()
 app = create_app(CallbackService(OperationLog(store)))

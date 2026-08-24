@@ -5,5 +5,8 @@ from .main import create_app
 from .runtime import ApiRuntime
 
 
-runtime = ApiRuntime(SmartWateringService(), ApiSettings.from_env())
+runtime = ApiRuntime(
+    SmartWateringService(reuse_connections=True),
+    ApiSettings.from_env(),
+)
 app = create_app(runtime)
