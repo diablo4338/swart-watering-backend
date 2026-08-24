@@ -347,7 +347,11 @@ class DeviceCardService:
                 },
                 "source": status.get("source") if data_available else "none",
                 "primary_value": primary_value,
-                "snapshot_at": status.get("result_received_at"),
+                "snapshot_at": (
+                    status.get("result_received_at")
+                    if not online and status.get("source") == "snapshot"
+                    else None
+                ),
                 "statistics": statistics,
             },
             "refresh": {

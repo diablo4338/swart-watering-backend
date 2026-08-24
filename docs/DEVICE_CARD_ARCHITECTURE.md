@@ -36,6 +36,10 @@ The next monitor cycle is responsible for bringing it online again. Overview dat
 exposes `source` as `live`, `snapshot`, or `none`. The Android client never owns or
 infers connectivity state.
 
+The overview projection includes `snapshot_at` only when the MCU is offline and the
+displayed values come from a stored snapshot. Android additionally renders that
+timestamp only for the explicit `offline` status.
+
 ## Goal
 
 The Android client asks for a device and its card. It does not inspect operation queues, infer workflow state, recover running operations, or know backend operation status names. The backend exposes a ready-to-render semantic read model and owns all device state machines.

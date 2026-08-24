@@ -221,6 +221,23 @@ def test_v3_device_card_exposes_server_driven_blocks_and_actions() -> None:
         assert overview.json()["block"]["data"]["status"]["code"] == "offline"
         assert overview.json()["block"]["data"]["source"] == "none"
 
+        with patch.object(
+            DeviceStateProjectionService,
+            "project_current_device_state",
+            return_value={
+                "online": False,
+                "available": True,
+                "source": "snapshot",
+                "result": {"weight": {}, "config": {}, "watering": {}},
+                "result_received_at": 123.0,
+            },
+        ):
+            snapshot_overview = client.get(
+                "/api/v3/devices/avocado/card/blocks/overview",
+                headers=headers,
+            )
+        assert snapshot_overview.json()["block"]["data"]["snapshot_at"] == 123.0
+
         runtime.presence.mark_online("avocado")
         with patch.object(
             DeviceStateProjectionService,
@@ -246,6 +263,7 @@ def test_v3_device_card_exposes_server_driven_blocks_and_actions() -> None:
         live_data = live_overview.json()["block"]["data"]
         assert live_data["status"]["code"] == "online"
         assert live_data["source"] == "live"
+        assert live_data["snapshot_at"] is None
         assert live_data["primary_value"]["value"] == 184
         runtime.presence.mark_offline("avocado", "test offline")
 
