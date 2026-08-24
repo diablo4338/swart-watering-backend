@@ -151,6 +151,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LatestStatusResponse"
+  /api/v2/devices/{device}/health:
+    get:
+      summary: Check controller availability using its lightweight health endpoint
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceName"
+      responses:
+        "200":
+          description: Device connectivity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceHealthResponse"
   /api/v2/devices/{device}/status/live:
     get:
       summary: Return a direct live controller status read
@@ -991,6 +1005,17 @@ components:
           nullable: true
           allOf:
             - $ref: "#/components/schemas/ApiError"
+    DeviceHealthResponse:
+      type: object
+      required: [device, status, online]
+      properties:
+        device:
+          type: string
+        status:
+          type: string
+          enum: [online, offline]
+        online:
+          type: boolean
     Operation:
       type: object
       required: [operation_id, device, type, status, updated_at, finished_at]

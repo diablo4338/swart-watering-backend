@@ -138,6 +138,11 @@ def latest_status(device_name: str, api: RuntimeDep, _session: SessionDep) -> di
     return api.service.latest_device_status_response(device_name)
 
 
+@router.get("/devices/{device_name}/health")
+def device_health(device_name: str, api: RuntimeDep, _session: SessionDep) -> dict[str, Any]:
+    return api.service.device_health_response(device_name)
+
+
 @router.get("/devices/{device_name}/status/live")
 def live_status(device_name: str, api: RuntimeDep, _session: SessionDep) -> dict[str, Any]:
     return api.service.live_device_status_response(device_name)

@@ -3239,6 +3239,48 @@ def test_public_api_status_live_route_is_registered() -> None:
     paths = [route.path for route in public_api_devices.router.routes]
 
     assert "/api/v2/devices/{device_name}/status/live" in paths
+    assert "/api/v2/devices/{device_name}/health" in paths
+
+
+def test_public_api_device_health_uses_lightweight_controller_endpoint() -> None:
+    class HealthApi:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def request_text(self, base_url, path, method, payload=None):
+            self.requests.append((base_url, path, method, payload))
+            return "ok"
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.registry.add("192.168.1.10", "plant", "plant_1")
+        service = PublicApiService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
+        service.health_api = HealthApi()
+
+        body = service.device_health_response("plant_1")
+
+        assert body == {"device": "plant_1", "status": "online", "online": True}
+        assert service.health_api.requests == [
+            ("http://192.168.1.10", "/healthz", "GET", None)
+        ]
+
+
+def test_public_api_device_health_reports_offline_without_live_status_read() -> None:
+    class OfflineHealthApi:
+        def request_text(self, base_url, path, method, payload=None):
+            raise smart_core.RetryableDeviceApiError("device sleeping")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.registry.add("192.168.1.10", "plant", "plant_1")
+        service = PublicApiService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
+        service.health_api = OfflineHealthApi()
+
+        assert service.device_health_response("plant_1") == {
+            "device": "plant_1",
+            "status": "offline",
+            "online": False,
+        }
 
 
 def test_public_api_status_live_returns_live_result() -> None:

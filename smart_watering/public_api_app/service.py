@@ -4,7 +4,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from smart_watering.application.service import SmartWateringService
-from smart_watering.domain import SmartWateringError
+from smart_watering.domain import DeviceApiClient, SmartWateringError
 
 from .domain import DeviceStatus, DeviceStatusSource, number_or_none
 from .errors import PublicApiError
@@ -21,6 +21,7 @@ from .statistics import (
 
 
 LATEST_STATUS_LIVE_TIMEOUT_SEC = 3
+DEVICE_HEALTH_TIMEOUT_SEC = 1
 CONTROL_OPERATION_TYPES = {
     "config", "sleep_enable", "sleep_disable", "sleep_interval",
     "zero_capture", "scale_calibration",
@@ -37,6 +38,7 @@ class PublicApiService:
         consumption_median_days: int = 5,
     ) -> None:
         self.app = app
+        self.health_api = DeviceApiClient(DEVICE_HEALTH_TIMEOUT_SEC)
         self.prometheus = PrometheusClient(prometheus_url)
         self.statistics_timezone = statistics_timezone
         self.consumption_drop_threshold_percent = consumption_drop_threshold_percent
@@ -214,6 +216,21 @@ class PublicApiService:
             ),
             error_code="device_status_snapshot_not_found",
         )
+
+    def device_health_response(self, device_name: str) -> dict[str, Any]:
+        device = self.app.registry.get(device_name)
+        try:
+            self.health_api.request_text(
+                device.base_url, "/healthz", "GET"
+            )
+            online = True
+        except SmartWateringError:
+            online = False
+        return {
+            "device": device.name,
+            "status": DeviceStatus.ONLINE if online else DeviceStatus.OFFLINE,
+            "online": online,
+        }
 
     def live_device_status_response(self, device_name: str) -> dict[str, Any]:
         device = self.app.registry.get(device_name)
