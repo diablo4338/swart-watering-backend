@@ -4,10 +4,18 @@ Status: v3 baseline implemented; breaking changes are allowed.
 
 ## Implemented baseline
 
-- `GET /api/v3/devices` returns card profiles and opaque card links.
-- `GET /api/v3/devices/{device}/card` returns the initial ordered block projection.
-- `GET /api/v3/devices/{device}/card/blocks/{block}` refreshes only one visible block.
-- `POST /api/v3/devices/{device}/actions/{action}` executes an advertised action and returns a new projection.
+- `GET /api/v3/devices` returns immutable database IDs, display names, card profiles,
+  and opaque card links. The MCU name is not an identity field in the client contract.
+- `GET /api/v3/devices/{device_id}/card` returns the initial ordered block projection.
+- `GET /api/v3/devices/{device_id}/card/blocks/{block}` refreshes one visible block.
+- `POST /api/v3/devices/{device_id}/actions/{action}` executes an advertised action and returns a new projection.
+- Every v3 device URL and response `device_id` uses immutable `devices.id`; backend
+  names and MCU identifiers are never API resource identifiers.
+- The same identity rule applies below HTTP: application commands, operations, queue
+  rows, worker partition keys, runtime snapshots, presence and caches are keyed by
+  `devices.id`. A rename therefore changes presentation only and cannot move work or
+  state between keys. Names, IPs and controller identifiers are never recovery or
+  correlation keys.
 - `/api/v3/auth/...` owns login, Google login, and logout for the current client.
 - Android renders `device_overview`, `dynamic_form`, `history`, `operation_queue`, and `progress` through a native control registry.
 - In the plant profile, the operation queue is rendered after the expandable history/control content and before overview statistics.
@@ -30,15 +38,23 @@ Binary `online` or `offline` results are stored in the thread-safe runtime
 
 Card and block requests never contact the MCU. The periodic snapshot worker is the
 single regular source of full MCU state and stores successful `/watering` responses.
+The public API keeps a `DeviceRuntimeState` owner for the current normalized state.
+Snapshot/callback persistence revisions refresh that owner; projections read only a
+serializer-validated copy. If its process-local value is missing, stale, or fails
+serialization, it self-recovers from the latest successful stored snapshot before
+returning data to a card builder.
 When the MCU confirms a deterministic configuration command through its callback,
-the backend applies only that command's confirmed fields to the latest stored
-snapshot. This keeps snapshot-backed blocks current without reading operation state
-during projection or waiting for another full snapshot.
+the immutable stored snapshot is not rewritten. The callback persists a confirmed
+operation delta; `DeviceRuntimeState` applies deltas newer than its base snapshot in
+order. This keeps snapshot-backed blocks current without making a callback masquerade
+as a full MCU snapshot or waiting for the next snapshot cycle.
 The presence monitor independently projects `online` or `offline` from its health
 probes. A device is `offline` until its first successful probe. Cards read the latest stored snapshot regardless of connectivity;
-an advertised manual refresh action performs an immediate direct MCU read and stores
-the result without using the command queue. A failed manual read returns
-`accepted: false`, and Android keeps its current card unchanged. Overview data
+the result without using the command queue. The refresh button follows only that
+advertised `refresh_card` action: it does not reload the catalog, prefetch blocks, or
+run client-side recovery. A successful action returns the complete card projected
+from the new MCU snapshot, so every block is replaced together. A failed manual read
+returns `accepted: false`, and Android keeps its current card unchanged. Overview data
 exposes `source` as `snapshot` or `none`. The Android client never owns or infers
 connectivity state.
 
@@ -62,6 +78,20 @@ The design is deliberately split between:
 The client is not a generic browser for arbitrary server-defined UI. It supports a versioned vocabulary of block and field types and fails safely when it receives an unsupported required component.
 
 ## Responsibility boundary
+
+### Device registration safety boundary
+
+Device registration has exactly two explicit strategies:
+
+- `devices add <ip> <backend-name> --type <type>` creates only a backend database
+  record. It never contacts or configures the MCU.
+- `devices discover <ip>` queues a worker-owned, read-only `GET /watering`. The
+  worker imports the MCU-provided identity, type, and supported settings. Discovery
+  must never enqueue or execute `/config` or any other write request.
+
+The worker rejects any command under a discovery identity unless it is exactly
+`GET /watering` with no payload. Changing the MCU identifier is a separate explicit
+action and cannot be inferred from either registration strategy.
 
 ### Block data dependency contract
 
@@ -172,7 +202,7 @@ The response describes ordered blocks and returns enough initial data to render 
 
 ```json
 {
-  "device_id": "avocado",
+  "device_id": "550e8400-e29b-41d4-a716-446655440000",
   "profile": "plant.v1",
   "schema_version": 1,
   "blocks": [
@@ -192,13 +222,13 @@ The response describes ordered blocks and returns enough initial data to render 
       "actions": [
         {
           "kind": "action",
-          "id": "refresh_status",
-          "label": "Refresh device status",
+          "id": "refresh_card",
+          "label": "Refresh card",
           "control_type": "button.v1",
           "enabled": true,
           "request": {
             "method": "POST",
-            "href": "/api/v3/devices/avocado/actions/refresh-status",
+            "href": "/api/v3/devices/550e8400-e29b-41d4-a716-446655440000/actions/refresh-card",
             "body": {"binding": "none"}
           }
         }
@@ -206,7 +236,7 @@ The response describes ordered blocks and returns enough initial data to render 
       "refresh": {
         "mode": "poll",
         "interval_ms": 5000,
-        "href": "/api/v3/devices/avocado/card/blocks/overview",
+        "href": "/api/v3/devices/550e8400-e29b-41d4-a716-446655440000/card/blocks/overview",
         "etag": "overview-184"
       }
     },
@@ -219,7 +249,7 @@ The response describes ordered blocks and returns enough initial data to render 
       "data": {},
       "refresh": {
         "mode": "on_open",
-        "href": "/api/v3/devices/avocado/card/blocks/control"
+        "href": "/api/v3/devices/550e8400-e29b-41d4-a716-446655440000/card/blocks/control"
       }
     },
     {
@@ -231,7 +261,7 @@ The response describes ordered blocks and returns enough initial data to render 
       "data": {},
       "refresh": {
         "mode": "on_open",
-        "href": "/api/v3/devices/avocado/card/blocks/watering_parameters"
+        "href": "/api/v3/devices/550e8400-e29b-41d4-a716-446655440000/card/blocks/watering_parameters"
       }
     },
     {
@@ -242,7 +272,7 @@ The response describes ordered blocks and returns enough initial data to render 
       "data": {},
       "refresh": {
         "mode": "once",
-        "href": "/api/v3/devices/avocado/card/blocks/watering_history"
+        "href": "/api/v3/devices/550e8400-e29b-41d4-a716-446655440000/card/blocks/watering_history"
       }
     }
   ]
@@ -494,7 +524,7 @@ Every action currently returns the complete updated card:
 {
   "accepted": true,
   "card": {
-    "device_id": "fikus",
+    "device_id": "550e8400-e29b-41d4-a716-446655440000",
     "profile": "plant.v1",
     "schema_version": 1,
     "blocks": []

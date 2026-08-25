@@ -47,16 +47,17 @@ class SmartWateringService:
             return pending_id
         placeholder = f"{DISCOVERY_DEVICE_PREFIX}{base_url}"
         operation_id = self.operations.create(
-            placeholder, "device_discovery", {"base_url": base_url}
+            None, "device_discovery", {"base_url": base_url}, target_label=placeholder
         )
         return self.queue.enqueue(
             operation_id,
-            placeholder,
+            None,
             base_url,
             "/watering",
             "GET",
             None,
             f"discover device at {base_url}",
+            target_label=placeholder,
         )
 
     def cancel_device_discovery(self, ip_or_url: str) -> list[str]:
@@ -90,23 +91,23 @@ class SmartWateringService:
         if duplicate is not None:
             return duplicate
         operation_id = self.operations.create(
-            device.name, operation_type, payload or {}, correlation_id, causation_id,
+            device.id, operation_type, payload or {}, correlation_id, causation_id,
         )
         command_payload = self.build_operation_payload(operation_id, payload)
         self.operations.update_payload(operation_id, command_payload)
         queued_id = self.queue.enqueue(
-            operation_id, device.name, device.base_url, path, method,
+            operation_id, device.id, device.base_url, path, method,
             None if method == "GET" else command_payload, description,
         )
         if queued_id != operation_id:
             self.operations.event(operation_id, OP_CANCELLED, f"duplicate command already queued: {queued_id}")
         return queued_id
 
-    def clear_device_queue(self, device_name: str) -> int:
-        self.registry.get(device_name)
-        self.queue.drop_device(device_name)
+    def clear_device_queue(self, device_id: str) -> int:
+        self.registry.get_by_id(device_id)
+        self.queue.drop_device(device_id)
         operation_ids = self.operations.cancel_non_terminal(
-            device_name,
+            device_id,
             "cancelled by device queue clear",
         )
         return len(operation_ids)
@@ -115,7 +116,7 @@ class SmartWateringService:
         self, device: Device, config: dict, description: str,
         confirm_retry_duplicate: bool = False,
     ) -> str | None:
-        self.registry.validate_config_update(device.name, config)
+        self.registry.validate_config_update(device.id, config)
         payload = {
             "device_type": config.get("device_type", device.device_type),
             "name": config.get("name", device.controller_name),
@@ -139,8 +140,8 @@ class SmartWateringService:
             return None
         return self._enqueue(device, "config", "/config", payload, description)
 
-    def queue_controller_name(self, device_name: str, controller_name: str) -> str:
-        device = self.registry.get(device_name)
+    def queue_controller_name(self, device_id: str, controller_name: str) -> str:
+        device = self.registry.get_by_id(device_id)
         payload = {"device_type": device.device_type, "name": controller_name}
         return self._enqueue(
             device, "controller_name", "/config", payload,
@@ -148,22 +149,22 @@ class SmartWateringService:
         )
 
     def queue_device_config_if_not_confirmed(self, device: Device) -> None:
-        latest = self.operations.latest_for_device(device.name, "config")
+        latest = self.operations.latest_for_device(device.id, "config")
         if latest is not None and latest["status"] != OP_SUCCESS:
             self.queue_device_config(
                 device, {"device_type": device.device_type},
                 f"confirm {device.name} config",
             )
 
-    def queue_fill(self, device_name: str, grams: float) -> str:
+    def queue_fill(self, device_id: str, grams: float) -> str:
         if grams <= 0:
             raise SmartWateringError("fill grams must be > 0")
-        device = self.registry.get(device_name)
+        device = self.registry.get_by_id(device_id)
         if device.device_type != DeviceType.TANK:
             raise SmartWateringError(
                 f"watering can only be started on tank devices, got {device.name} ({device.device_type})"
             )
-        existing = self.operations.latest_non_terminal_watering_start(device.name)
+        existing = self.operations.latest_non_terminal_watering_start(device.id)
         if existing is not None:
             return existing["operation_id"]
         self.queue_device_config_if_not_confirmed(device)
@@ -172,13 +173,13 @@ class SmartWateringService:
             f"fill {device.name} {grams:.1f} g",
         )
 
-    def queue_stop(self, device_name: str) -> str:
-        device = self.registry.get(device_name)
+    def queue_stop(self, device_id: str) -> str:
+        device = self.registry.get_by_id(device_id)
         if device.device_type != DeviceType.TANK:
             raise SmartWateringError(
                 f"watering can only be stopped on tank devices, got {device.name} ({device.device_type})"
             )
-        active = self.operations.latest_non_terminal_watering_start(device.name)
+        active = self.operations.latest_non_terminal_watering_start(device.id)
         cause_id = active["operation_id"] if active else None
         correlation_id = active.get("correlation_id") if active else None
         operation_id = self._enqueue(
@@ -186,7 +187,7 @@ class SmartWateringService:
             correlation_id=correlation_id, causation_id=cause_id,
         )
         cancelled = self.operations.cancel_active_watering_starts(
-            device.name, "cancelled by watering stop"
+            device.id, "cancelled by watering stop"
         )
         for cancelled_id in cancelled:
             self.operations.trace_event(
@@ -198,11 +199,11 @@ class SmartWateringService:
                 operation_id, "backend", "operation.related", "watering starts cancelled",
                 {"related_operation_ids": cancelled, "relation": "cancels"},
             )
-        self.queue.drop_pending_watering_start(device.name)
+        self.queue.drop_pending_watering_start(device.id)
         return operation_id
 
-    def queue_sleep(self, device_name: str, enabled: bool) -> str:
-        device = self.registry.get(device_name)
+    def queue_sleep(self, device_id: str, enabled: bool) -> str:
+        device = self.registry.get_by_id(device_id)
         action = "enable" if enabled else "disable"
         return self._enqueue(
             device, f"sleep_{action}", f"/sleep/{action}", {},
@@ -210,13 +211,13 @@ class SmartWateringService:
         )
 
     def queue_sleep_interval(
-        self, device_name: str, minutes: int, confirm_retry_duplicate: bool = False,
+        self, device_id: str, minutes: int, confirm_retry_duplicate: bool = False,
     ) -> str | None:
         if minutes <= 0:
             raise SmartWateringError("sleep interval minutes must be > 0")
         if minutes > MAX_SLEEP_INTERVAL_MIN:
             raise SmartWateringError(f"sleep interval minutes must be <= {MAX_SLEEP_INTERVAL_MIN}")
-        device = self.registry.get(device_name)
+        device = self.registry.get_by_id(device_id)
         payload = {"minutes": minutes}
         duplicate = self.queue.find_duplicate(
             device.base_url, "/sleep/interval", "POST", payload
@@ -248,31 +249,31 @@ class SmartWateringService:
     def confirm_retryable_command_conflict(self, _command, _payload: dict) -> bool:
         return False
 
-    def queue_zero(self, device_name: str) -> str:
-        device = self.registry.get(device_name)
+    def queue_zero(self, device_id: str) -> str:
+        device = self.registry.get_by_id(device_id)
         return self._enqueue(device, "zero_capture", "/zero", {}, f"set zero {device.name}")
 
-    def queue_calibration(self, device_name: str, weight_g: float) -> str:
+    def queue_calibration(self, device_id: str, weight_g: float) -> str:
         if weight_g <= 0:
             raise SmartWateringError("calibration weight must be > 0")
-        device = self.registry.get(device_name)
+        device = self.registry.get_by_id(device_id)
         return self._enqueue(
             device, "scale_calibration", "/calibration", {"weight_g": weight_g},
             f"calibrate {device.name} {weight_g:.1f} g",
         )
 
-    def queue_device_status(self, device_name: str) -> str:
-        device = self.registry.get(device_name)
+    def queue_device_status(self, device_id: str) -> str:
+        device = self.registry.get_by_id(device_id)
         return self._enqueue(
             device, "device_status", "/watering", None,
             f"read status {device.name}", method="GET",
         )
 
-    def request_device_status_snapshot(self, device_name: str) -> str:
+    def request_device_status_snapshot(self, device_id: str) -> str:
         """Fetch and persist a status snapshot immediately, without the command queue."""
-        device = self.registry.get(device_name)
+        device = self.registry.get_by_id(device_id)
         result = self.api.request_json(device.base_url, "/watering", "GET")
-        operation_id = self.operations.create(device.name, "device_status", {})
+        operation_id = self.operations.create(device.id, "device_status", {})
         self.operations.update_result(operation_id, result)
         self.operations.event(
             operation_id,

@@ -1,5 +1,7 @@
 ﻿import time
+from copy import deepcopy
 from datetime import datetime, timedelta
+from threading import RLock
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -24,6 +26,62 @@ from .presence import DevicePresenceRegistry
 LIVE_STATE_REQUEST_TIMEOUT_SEC = 3
 
 
+class DeviceRuntimeState:
+    """Validated, process-local owner of the latest observed state per device."""
+
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._states: dict[str, tuple[tuple[Any, Any], dict[str, Any]]] = {}
+
+    def update_from_snapshot(
+        self, device_id: str, revision: tuple[Any, Any], state: dict[str, Any]
+    ) -> dict[str, Any]:
+        serialized = self.serialize(state)
+        with self._lock:
+            self._states[device_id] = (revision, serialized)
+        return deepcopy(serialized)
+
+    def read(
+        self, device_id: str, revision: tuple[Any, Any], recover: Any
+    ) -> dict[str, Any]:
+        with self._lock:
+            cached = self._states.get(device_id)
+        if cached is not None and cached[0] == revision:
+            try:
+                return deepcopy(self.serialize(cached[1]))
+            except (TypeError, ValueError):
+                pass
+        return self.update_from_snapshot(device_id, revision, recover())
+
+    @classmethod
+    def apply_callback_patches(
+        cls, state: dict[str, Any], patches: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        result = deepcopy(state)
+
+        def merge(target: dict[str, Any], delta: dict[str, Any]) -> None:
+            for key, value in delta.items():
+                if isinstance(target.get(key), dict) and isinstance(value, dict):
+                    merge(target[key], value)
+                else:
+                    target[key] = value
+
+        for item in patches:
+            merge(result, item["patch"])
+        return cls.serialize(result)
+
+    @staticmethod
+    def serialize(state: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(state, dict):
+            raise TypeError("device state must be an object")
+        required = {"device", "watering", "config", "weight"}
+        if not required.issubset(state):
+            raise ValueError("device state is incomplete")
+        if not all(isinstance(state[key], dict) for key in required):
+            raise TypeError("device state sections must be objects")
+        return deepcopy(state)
+
+
 class DeviceStateProjectionService:
     def __init__(
         self,
@@ -40,6 +98,7 @@ class DeviceStateProjectionService:
         self.consumption_drop_threshold_percent = consumption_drop_threshold_percent
         self.consumption_median_days = consumption_median_days
         self.presence = presence or DevicePresenceRegistry()
+        self.runtime_state = DeviceRuntimeState()
 
     @staticmethod
     def project_device_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
@@ -75,18 +134,35 @@ class DeviceStateProjectionService:
             },
         }
 
-    def project_snapshot_device_state(self, device_name: str) -> dict[str, Any]:
-        device = self.business.registry.get(device_name)
-        latest = self.business.operations.latest_successful_result(device.name, "device_status")
+    def project_snapshot_device_state(self, device_id: str) -> dict[str, Any]:
+        device = self.business.registry.get_by_id(device_id)
+        latest = self.business.operations.latest_successful_result(device.id, "device_status")
         if latest is not None and latest["result"] is not None:
+            snapshot_updated_at = latest.get("updated_at") or latest["result_received_at"]
+            patches = self.business.operations.confirmed_snapshot_patches_since(
+                device.id, snapshot_updated_at
+            )
+            revision = (
+                latest["operation_id"],
+                patches[-1]["operation_id"] if patches else snapshot_updated_at,
+            )
+            result = self.runtime_state.read(
+                device.id,
+                revision,
+                lambda: self.runtime_state.apply_callback_patches(
+                    self.project_device_snapshot(latest["result"]), patches
+                ),
+            )
             return self.project_available_device_state(
+                device_id=device.id,
                 device_name=device.name,
                 source=DeviceStatusSource.SNAPSHOT,
-                result=self.project_device_snapshot(latest["result"]),
+                result=result,
                 result_received_at=latest["result_received_at"],
                 operation_id=latest["operation_id"],
             )
         return self.project_unavailable_device_state(
+            device_id=device.id,
             device_name=device.name,
             exc=SmartWateringError(
                 f"no stored status snapshot exists for device '{device.name}'"
@@ -94,22 +170,22 @@ class DeviceStateProjectionService:
             error_code="device_status_snapshot_not_found",
         )
 
-    def project_current_device_state(self, device_name: str) -> dict[str, Any]:
+    def project_current_device_state(self, device_id: str) -> dict[str, Any]:
         """Project the latest stored MCU state with independently monitored presence."""
-        presence = self.presence.get(device_name)
+        presence = self.presence.get(device_id)
         return {
-            **self.project_snapshot_device_state(device_name),
+            **self.project_snapshot_device_state(device_id),
             "status": DeviceStatus(presence.state),
             "online": presence.online,
             "presence_checked_at": presence.checked_at,
         }
 
-    def project_live_device_state(self, device_name: str) -> dict[str, Any]:
-        device = self.business.registry.get(device_name)
+    def project_live_device_state(self, device_id: str) -> dict[str, Any]:
+        device = self.business.registry.get_by_id(device_id)
         try:
             return self._request_live_device_state(device)
         except SmartWateringError as exc:
-            return self.project_unavailable_device_state(device.name, exc)
+            return self.project_unavailable_device_state(device.id, device.name, exc)
 
     def _request_live_device_state(
         self,
@@ -123,9 +199,10 @@ class DeviceStateProjectionService:
             config = result.get("config") if isinstance(result, dict) else None
             if isinstance(config, dict):
                 self.business.registry.confirm_watering_settings(
-                    device.name, config, time.time()
+                    device.id, config, time.time()
                 )
             return self.project_available_device_state(
+                device_id=device.id,
                 device_name=device.name,
                 source=DeviceStatusSource.LIVE,
                 result=self.project_device_snapshot(result),
@@ -138,6 +215,7 @@ class DeviceStateProjectionService:
 
     @staticmethod
     def project_available_device_state(
+        device_id: str,
         device_name: str,
         source: DeviceStatusSource,
         result: dict[str, Any],
@@ -145,7 +223,8 @@ class DeviceStateProjectionService:
         operation_id: str | None,
     ) -> dict[str, Any]:
         return {
-            "device": device_name,
+            "device_id": device_id,
+            "device_name": device_name,
             "status": (
                 DeviceStatus.ONLINE
                 if source is DeviceStatusSource.LIVE
@@ -159,12 +238,14 @@ class DeviceStateProjectionService:
 
     @staticmethod
     def project_unavailable_device_state(
+        device_id: str,
         device_name: str,
         exc: SmartWateringError,
         error_code: str = "device_status_unavailable",
     ) -> dict[str, Any]:
         return {
-            "device": device_name,
+            "device_id": device_id,
+            "device_name": device_name,
             "status": DeviceStatus.OFFLINE,
             "source": DeviceStatusSource.NONE,
             "available": False,
@@ -178,8 +259,8 @@ class DeviceStateProjectionService:
             },
         }
 
-    def project_water_consumption(self, device_name: str) -> dict[str, Any]:
-        device = self.business.registry.get(device_name)
+    def project_water_consumption(self, device_id: str) -> dict[str, Any]:
+        device = self.business.registry.get_by_id(device_id)
         if device.device_type != "plant":
             raise PublicApiError(
                 f"device '{device.name}' is not a plant; water consumption "
@@ -244,12 +325,12 @@ class DeviceStateProjectionService:
                         self.consumption_drop_threshold_percent,
                     )
                 )
-        return {"device": device_name, "days": list(rows.values())[:7]}
+        return {"device_id": device.id, "device_name": device.name, "days": list(rows.values())[:7]}
 
     def project_watering_history(
-        self, device_name: str, limit: int, offset: int
+        self, device_id: str, limit: int, offset: int
     ) -> dict[str, Any]:
-        device = self.business.registry.get(device_name)
+        device = self.business.registry.get_by_id(device_id)
         if device.device_type != "plant":
             raise PublicApiError(
                 f"device '{device.name}' is not a plant",
@@ -257,10 +338,11 @@ class DeviceStateProjectionService:
                 "not_a_plant",
             )
         events, has_more = self.business.plant_waterings.list_valid_page(
-            device.name, limit, offset
+            device.id, limit, offset
         )
         return {
-            "device": device.name,
+            "device_id": device.id,
+            "device_name": device.name,
             "waterings": [
                 {
                     key: event[key]
@@ -276,10 +358,10 @@ class DeviceStateProjectionService:
         }
 
     def delete_watering_history_item(
-        self, device_name: str, event_id: int
+        self, device_id: str, event_id: int
     ) -> dict[str, Any]:
-        device = self.business.registry.get(device_name)
-        if not self.business.plant_waterings.invalidate(device.name, event_id):
+        device = self.business.registry.get_by_id(device_id)
+        if not self.business.plant_waterings.invalidate(device.id, event_id):
             raise PublicApiError(
                 f"detected watering '{event_id}' does not exist",
                 404,
@@ -288,15 +370,15 @@ class DeviceStateProjectionService:
         return {"id": event_id, "invalid": True}
 
     def set_watering_history_fertilized(
-        self, device_name: str, event_id: int, fertilized: bool
+        self, device_id: str, event_id: int, fertilized: bool
     ) -> dict[str, Any]:
-        device = self.business.registry.get(device_name)
+        device = self.business.registry.get_by_id(device_id)
         if device.device_type != "plant":
             raise PublicApiError(
                 f"device '{device.name}' is not a plant", 404, "not_a_plant"
             )
         event = self.business.plant_waterings.set_fertilized(
-            device.name, event_id, fertilized
+            device.id, event_id, fertilized
         )
         if event is None:
             raise PublicApiError(

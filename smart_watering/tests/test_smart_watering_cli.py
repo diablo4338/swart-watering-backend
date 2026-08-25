@@ -391,11 +391,12 @@ def test_detector_uses_previous_sample_at_fifty_minute_interval() -> None:
 
         detector.prometheus.range_samples = range_samples
 
-        result = detector.scan_device("plant_1", start, end)
+        device_id = app.registry.get("plant_1").id
+        result = detector.scan_device(device_id, start, end)
 
         assert requested_ranges[0][0] == start - timedelta(minutes=50)
         assert result.detected == 1
-        assert app.plant_waterings.list_valid("plant_1")[0]["amount_g"] == 448.0
+        assert app.plant_waterings.list_valid(device_id)[0]["amount_g"] == 448.0
 
 
 def test_detector_does_not_store_events_before_requested_range() -> None:
@@ -410,12 +411,11 @@ def test_detector_does_not_store_events_before_requested_range() -> None:
             (start.timestamp(), 3990.0),
         ]
 
-        result = detector.scan_device(
-            "plant_1", start, start + timedelta(hours=3)
-        )
+        device_id = app.registry.get("plant_1").id
+        result = detector.scan_device(device_id, start, start + timedelta(hours=3))
 
         assert result.detected == 0
-        assert app.plant_waterings.list_valid("plant_1") == []
+        assert app.plant_waterings.list_valid(device_id) == []
 
 
 def test_detect_watering_events_plant_2_real_samples_2026_07_24() -> None:
@@ -492,7 +492,7 @@ def test_detect_watering_events_discards_zero_and_negative_values() -> None:
 def test_invalid_detected_watering_is_not_recreated() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("10.0.0.1", "plant", "plant_1")
+        device = app.registry.add("10.0.0.1", "plant", "plant_1")
         event = {
             "event_start_at": 100.0,
             "occurred_at": 200.0,
@@ -501,24 +501,24 @@ def test_invalid_detected_watering_is_not_recreated() -> None:
             "amount_g": 30.0,
         }
 
-        stored, created = app.plant_waterings.upsert_detected("plant_1", event)
+        stored, created = app.plant_waterings.upsert_detected(device.id, event)
         assert created is True
-        assert app.plant_waterings.invalidate("plant_1", stored["id"]) is True
+        assert app.plant_waterings.invalidate(device.id, stored["id"]) is True
 
         same, created_again = app.plant_waterings.upsert_detected(
-            "plant_1",
+            device.id,
             {**event, "occurred_at": 220.0, "weight_after_g": 140.0, "amount_g": 40.0},
         )
 
         assert created_again is False
         assert same["invalid"] is True
-        assert app.plant_waterings.list_valid("plant_1") == []
+        assert app.plant_waterings.list_valid(device.id) == []
 
 
 def test_detected_watering_new_start_does_not_duplicate_same_new_baseline() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("10.0.0.1", "plant", "plant_1")
+        device = app.registry.add("10.0.0.1", "plant", "plant_1")
         event = {
             "event_start_at": 100.0,
             "occurred_at": 200.0,
@@ -526,15 +526,15 @@ def test_detected_watering_new_start_does_not_duplicate_same_new_baseline() -> N
             "weight_after_g": 130.0,
             "amount_g": 30.0,
         }
-        app.plant_waterings.upsert_detected("plant_1", event)
+        app.plant_waterings.upsert_detected(device.id, event)
 
         _stored, created = app.plant_waterings.upsert_detected(
-            "plant_1",
+            device.id,
             {**event, "event_start_at": 110.0},
         )
 
         assert created is False
-        assert len(app.plant_waterings.list_valid("plant_1")) == 1
+        assert len(app.plant_waterings.list_valid(device.id)) == 1
 
 
 def make_store(temp_dir: str) -> smart_core.SQLiteStore:
@@ -543,9 +543,19 @@ def make_store(temp_dir: str) -> smart_core.SQLiteStore:
     return store
 
 
+def registered_device_id(store: smart_core.SQLiteStore, name: str) -> str:
+    registry = smart_core.DeviceRegistry(store)
+    try:
+        return registry.get(name).id
+    except smart_core.SmartWateringError:
+        return registry.add("192.0.2.1", "plant", name).id
+
+
 def add_confirmed_tank(app: smart_cli.SmartWateringCliApp, ip: str = "192.168.1.51", name: str = "main_tank") -> smart_core.Device:
-    app.registry.add(ip, "tank", name)
-    return app.registry.apply_confirmed_config(name, {"device_type": "tank", "name": name})
+    device = app.registry.add(ip, "tank", name)
+    return app.registry.apply_confirmed_config(
+        device.id, {"device_type": "tank", "name": name}
+    )
 
 
 def test_store_uses_env_database_path(monkeypatch) -> None:
@@ -597,9 +607,9 @@ def test_confirmed_rename_preserves_device_identity_and_related_data() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         device = app.registry.add("192.168.1.10", "plant", "plant_1")
-        app.registry.confirm_watering_settings("plant_1", {"dry_weight_g": 120}, 1.0)
+        app.registry.confirm_watering_settings(device.id, {"dry_weight_g": 120}, 1.0)
         app.plant_waterings.upsert_detected(
-            "plant_1",
+            device.id,
             {
                 "event_start_at": 10.0,
                 "occurred_at": 11.0,
@@ -608,21 +618,56 @@ def test_confirmed_rename_preserves_device_identity_and_related_data() -> None:
                 "amount_g": 50.0,
             },
         )
-        operation_id = app.operations.create("plant_1", "device_status", {})
+        operation_id = app.operations.create(device.id, "device_status", {})
 
-        renamed = app.registry.rename_backend("plant_1", "fern")
+        renamed = app.registry.rename_backend(device.id, "fern")
 
         assert renamed.id == device.id
-        assert app.registry.watering_settings("fern")["dry_weight_g"] == 120
-        assert len(app.plant_waterings.list_valid("fern")) == 1
+        assert app.registry.watering_settings(device.id)["dry_weight_g"] == 120
+        assert len(app.plant_waterings.list_valid(device.id)) == 1
         assert app.operations.detail(operation_id)["device"] == "fern"
+
+
+def test_backend_rename_does_not_move_queued_work_to_another_worker_key() -> None:
+    class AcceptedApi:
+        def request_json(self, _base_url, _path, _method, _payload=None):
+            return {"status": "accepted"}
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        device = app.registry.add("192.168.1.10", "plant", "plant_1")
+        operation_id = app.queue_sleep(device.id, True)
+
+        renamed = app.registry.rename_backend(device.id, "office")
+
+        assert renamed.id == device.id
+        assert app.queue.pending_worker_keys() == [device.id]
+        queued = app.queue.peek(device.id)
+        assert queued is not None
+        assert queued.device_id == device.id
+        assert queued.device_name == "office"
+
+        worker = smart_core.BackgroundWorker(
+            AcceptedApi(),
+            app.queue,
+            app.operations,
+            smart_core.WorkerState(str(Path(temp_dir) / "worker.pid")),
+            retry_interval_sec=0,
+            max_wait_sec=1,
+        )
+        worker.run_until_empty(device.id)
+
+        operation = app.operations.detail(operation_id)
+        assert operation["device_id"] == device.id
+        assert operation["device_name"] == "office"
+        assert app.queue.list() == []
 
 
 def test_successful_status_recovers_missing_watering_settings() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("192.168.1.10", "plant", "fern")
-        operation_id = app.operations.create("fern", "device_status", {})
+        device = app.registry.add("192.168.1.10", "plant", "fern")
+        operation_id = app.operations.create(device.id, "device_status", {})
         app.operations.update_result(
             operation_id,
             {
@@ -636,7 +681,7 @@ def test_successful_status_recovers_missing_watering_settings() -> None:
 
         app.operations.event(operation_id, "success", "status_received")
 
-        settings = app.registry.watering_settings("fern")
+        settings = app.registry.watering_settings(app.registry.get("fern").id)
         assert settings["dry_weight_g"] == 120
         assert settings["wet_weight_g"] == 510
         assert settings["watering_loss_threshold_percent"] == 35
@@ -657,10 +702,10 @@ def test_watering_setting_dates_are_updated_per_field_after_confirmed_changes() 
             "configure watering parameters",
         )
         app.operations.event(operation_id, "accepted", "device accepted command")
-        assert all(value is None for value in app.registry.watering_settings("plant_1").values())
+        assert all(value is None for value in app.registry.watering_settings(app.registry.get("plant_1").id).values())
 
         app.operations.event(operation_id, "success", "config_updated")
-        confirmed = app.registry.watering_settings("plant_1")
+        confirmed = app.registry.watering_settings(app.registry.get("plant_1").id)
 
         assert confirmed["dry_weight_g"] == 120
         assert confirmed["dry_weight_updated_at"] is not None
@@ -675,7 +720,7 @@ def test_watering_setting_dates_are_updated_per_field_after_confirmed_changes() 
             device, {"wet_weight_g": 510}, "update wet weight"
         )
         app.operations.event(wet_operation_id, "success", "config_updated")
-        partially_updated = app.registry.watering_settings("plant_1")
+        partially_updated = app.registry.watering_settings(app.registry.get("plant_1").id)
 
         assert partially_updated["dry_weight_g"] == 120
         assert partially_updated["dry_weight_updated_at"] == dry_updated_at
@@ -713,8 +758,8 @@ def test_registry_suffixes_duplicate_controller_name_without_changing_it() -> No
 def test_device_selector_shows_backend_name_and_controller_id(monkeypatch, capsys) -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("192.168.1.10", "plant", "fern")
-        app.registry.rename_backend("fern", "office")
+        device = app.registry.add("192.168.1.10", "plant", "fern")
+        app.registry.rename_backend(device.id, "office")
         monkeypatch.setattr("builtins.input", lambda _prompt: "1")
 
         selected = app.choose_device("Change MCU ID")
@@ -726,6 +771,33 @@ def test_device_selector_shows_backend_name_and_controller_id(monkeypatch, capsy
             "1. backend=office MCU_ID=fern (plant) 192.168.1.10"
             in capsys.readouterr().out
         )
+
+
+def test_interactive_configure_device_routes_name_to_backend_name(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        device = app.registry.add("192.168.1.10", "plant", "dev_board")
+        app.registry.rename_backend(device.id, "plant_1")
+        device = app.registry.get("plant_1")
+
+        monkeypatch.setattr(app, "choose_device", lambda _title: device)
+        monkeypatch.setattr(app, "prompt_device_type", lambda _default: "plant")
+        monkeypatch.setattr(
+            app,
+            "prompt",
+            lambda label, default="": "test" if label == "Device name" else default,
+        )
+        monkeypatch.setattr(app, "prompt_float", lambda _label: None)
+        monkeypatch.setattr(app, "report_operation", lambda _operation_id: True)
+
+        app.interactive_configure_device()
+
+        operation = app.operations.latest_for_device(device.id, "config")
+        assert operation is not None
+        assert operation["payload"]["backend_name"] == "test"
+        assert operation["payload"]["device_type"] == "plant"
+        assert operation["payload"]["name"] == "dev_board"
+        assert app.registry.get("plant_1").name == "plant_1"
 
 
 def test_controller_id_change_is_persisted_only_after_success_callback() -> None:
@@ -761,11 +833,11 @@ def test_discovery_keeps_same_controller_names_as_separate_backend_devices() -> 
 def test_registry_rejects_backend_rename_to_existing_device_name() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         registry = smart_core.DeviceRegistry(make_store(temp_dir))
-        registry.add("192.168.1.10", "plant", "plant_1")
+        device = registry.add("192.168.1.10", "plant", "plant_1")
         registry.add("192.168.1.11", "plant", "plant_2")
 
         try:
-            registry.rename_backend("plant_1", "plant_2")
+            registry.rename_backend(device.id, "plant_2")
         except smart_core.SmartWateringError as exc:
             assert "device name already exists" in str(exc)
         else:
@@ -775,16 +847,16 @@ def test_registry_rejects_backend_rename_to_existing_device_name() -> None:
 def test_registry_applies_pending_backend_name_only_with_confirmed_config() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         registry = smart_core.DeviceRegistry(make_store(temp_dir))
-        registry.add("192.168.1.10", "plant", "plant_1")
+        device = registry.add("192.168.1.10", "plant", "plant_1")
 
         desired = registry.validate_config_update(
-            "plant_1", {"backend_name": "new", "device_type": "plant"}
+            device.id, {"backend_name": "new", "device_type": "plant"}
         )
 
         assert desired.name == "new"
         assert registry.get("plant_1").name == "plant_1"
         registry.apply_confirmed_config(
-            "plant_1", {"backend_name": "new", "device_type": "plant"}
+            device.id, {"backend_name": "new", "device_type": "plant"}
         )
         assert registry.get("new").controller_name == "plant_1"
 
@@ -811,12 +883,12 @@ def test_registry_demotes_previous_tank_when_new_tank_config_is_confirmed() -> N
     with tempfile.TemporaryDirectory() as temp_dir:
         registry = smart_core.DeviceRegistry(make_store(temp_dir))
 
-        registry.add("192.168.1.10", "tank", "tank_a")
-        registry.apply_confirmed_config("tank_a", {"device_type": "tank", "name": "tank_a"})
-        registry.add("192.168.1.11", "tank", "tank_b")
+        tank_a = registry.add("192.168.1.10", "tank", "tank_a")
+        registry.apply_confirmed_config(tank_a.id, {"device_type": "tank", "name": "tank_a"})
+        tank_b = registry.add("192.168.1.11", "tank", "tank_b")
         assert registry.get("tank_b").device_type == "plant"
 
-        registry.apply_confirmed_config("tank_b", {"device_type": "tank", "name": "tank_b"})
+        registry.apply_confirmed_config(tank_b.id, {"device_type": "tank", "name": "tank_b"})
 
         devices = registry.list()
         assert [(device.name, device.device_type, device.ip) for device in devices] == [
@@ -829,8 +901,8 @@ def test_registry_add_tank_with_duplicate_controller_name_creates_separate_devic
     with tempfile.TemporaryDirectory() as temp_dir:
         registry = smart_core.DeviceRegistry(make_store(temp_dir))
 
-        registry.add("192.168.1.20", "tank", "main_tank")
-        registry.apply_confirmed_config("main_tank", {"device_type": "tank"})
+        main_tank = registry.add("192.168.1.20", "tank", "main_tank")
+        registry.apply_confirmed_config(main_tank.id, {"device_type": "tank"})
         registry.add("192.168.1.10", "plant", "plant_1")
         updated = registry.add("192.168.1.99", "tank", "plant_1")
 
@@ -839,7 +911,7 @@ def test_registry_add_tank_with_duplicate_controller_name_creates_separate_devic
         assert updated.device_type == "plant"
         assert updated.ip == "192.168.1.99"
         assert registry.get("plant_1").device_type == "plant"
-        registry.apply_confirmed_config("plant_1_1", {"device_type": "tank"})
+        registry.apply_confirmed_config(updated.id, {"device_type": "tank"})
         assert registry.get("plant_1_1").device_type == "tank"
         assert registry.get("plant_1_1").controller_name == "plant_1"
         assert registry.get("plant_1").ip == "192.168.1.10"
@@ -849,11 +921,11 @@ def test_registry_add_tank_with_duplicate_controller_name_creates_separate_devic
 def test_registry_config_to_tank_demotes_previous_tank() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         registry = smart_core.DeviceRegistry(make_store(temp_dir))
-        registry.add("192.168.1.20", "tank", "main_tank")
-        registry.apply_confirmed_config("main_tank", {"device_type": "tank", "name": "main_tank"})
-        registry.add("192.168.1.10", "plant", "plant_1")
+        main_tank = registry.add("192.168.1.20", "tank", "main_tank")
+        registry.apply_confirmed_config(main_tank.id, {"device_type": "tank", "name": "main_tank"})
+        plant = registry.add("192.168.1.10", "plant", "plant_1")
 
-        updated = registry.apply_confirmed_config("plant_1", {"device_type": "tank"})
+        updated = registry.apply_confirmed_config(plant.id, {"device_type": "tank"})
 
         assert updated.device_type == "tank"
         assert registry.get("plant_1").device_type == "tank"
@@ -874,7 +946,7 @@ def test_device_config_updates_registry_only_after_controller_success() -> None:
         app.operations.event(failed_operation_id, "accepted", "device accepted command")
         assert app.registry.get("plant_1").device_type == "plant"
         app.operations.event(failed_operation_id, "error", "config_update_failed")
-        app.queue.drop_device("plant_1")
+        app.queue.drop_device(device.id)
         assert app.registry.get("plant_1").device_type == "plant"
 
         success_operation_id = app.queue_device_config(
@@ -904,9 +976,10 @@ def test_queue_preserves_fifo_order() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         store = make_store(temp_dir)
         queue = smart_core.CommandQueue(store)
+        device_id = registered_device_id(store, "plant_1")
 
-        queue.enqueue("op-1", "plant_1", "http://device", "/config", "POST", {"name": "plant_1"}, "config")
-        queue.enqueue("op-2", "plant_1", "http://device", "/watering/start", "POST", {"target_g": 100}, "fill")
+        queue.enqueue("op-1", device_id, "http://device", "/config", "POST", {"name": "plant_1"}, "config")
+        queue.enqueue("op-2", device_id, "http://device", "/watering/start", "POST", {"target_g": 100}, "fill")
 
         commands = queue.list()
         assert [command.description for command in commands] == ["config", "fill"]
@@ -916,11 +989,12 @@ def test_stop_drops_all_queued_fill_commands() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         store = make_store(temp_dir)
         queue = smart_core.CommandQueue(store)
+        device_id = registered_device_id(store, "tank")
 
-        queue.enqueue("op-1", "tank", "http://device", "/watering/start", "POST", {"target_g": 100}, "fill 100")
-        queue.enqueue("op-2", "tank", "http://device", "/config", "POST", {"dry_weight_g": 50}, "config")
-        queue.enqueue("op-3", "tank", "http://device", "/watering/start", "POST", {"target_g": 50}, "fill 50")
-        queue.enqueue("op-4", "tank", "http://device", "/watering/stop", "POST", {}, "stop", drop_fill_commands=True)
+        queue.enqueue("op-1", device_id, "http://device", "/watering/start", "POST", {"target_g": 100}, "fill 100")
+        queue.enqueue("op-2", device_id, "http://device", "/config", "POST", {"dry_weight_g": 50}, "config")
+        queue.enqueue("op-3", device_id, "http://device", "/watering/start", "POST", {"target_g": 50}, "fill 50")
+        queue.enqueue("op-4", device_id, "http://device", "/watering/stop", "POST", {}, "stop", drop_fill_commands=True)
 
         commands = queue.list()
         assert [command.description for command in commands] == ["config", "stop"]
@@ -977,7 +1051,7 @@ def test_list_non_terminal_operations_filters_by_device_without_limit() -> None:
         other_device_id = app.queue_zero("plant_2")
         app.operations.event(terminal_id, "success", "completed")
 
-        operations = app.operations.list_non_terminal("plant_1")
+        operations = app.operations.list_non_terminal(app.registry.get("plant_1").id)
 
         assert {operation["operation_id"] for operation in operations} == set(active_ids)
         assert terminal_id not in {operation["operation_id"] for operation in operations}
@@ -1035,7 +1109,7 @@ def test_watering_start_reconfirms_failed_tank_config_before_fill() -> None:
             {"device_type": "tank"},
             "configure main_tank",
         )
-        app.queue.drop_device("main_tank")
+        app.queue.drop_device(app.registry.get("main_tank").id)
         app.operations.event(config_operation_id, "timeout", "controller result was not received")
 
         fill_operation_id = app.queue_fill("main_tank", 200)
@@ -1605,7 +1679,11 @@ def test_worker_stores_device_status_result() -> None:
 def test_operation_status_does_not_regress_after_terminal_event() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         operations = smart_core.OperationLog(make_store(temp_dir))
-        operation_id = operations.create("main_tank", "watering_start", {"target_g": 200})
+        operation_id = operations.create(
+            registered_device_id(operations.store, "main_tank"),
+            "watering_start",
+            {"target_g": 200},
+        )
 
         operations.event(operation_id, "sending", "worker picked operation")
         operations.event(operation_id, "success", "target_reached")
@@ -1700,8 +1778,8 @@ def test_interactive_devices_submenu_runs_add_as_first_action(monkeypatch) -> No
 def test_interactive_trace_operation_prints_structured_timeline(monkeypatch, capsys) -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("192.168.1.10", "plant", "plant_1")
-        operation_id = app.operations.create("plant_1", "device_status", {})
+        device = app.registry.add("192.168.1.10", "plant", "plant_1")
+        operation_id = app.operations.create(device.id, "device_status", {})
         app.operations.trace_event(
             operation_id, "worker", "command.picked", "worker picked operation",
             {"path": "/watering"},
@@ -1926,7 +2004,9 @@ def test_cli_waits_for_operation_success(capsys) -> None:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         app.operation_wait_timeout_sec = 1
         app.operation_poll_interval_sec = 0.01
-        operation_id = app.operations.create("plant_1", "config", {"name": "plant_1"})
+        operation_id = app.operations.create(
+            registered_device_id(app.store, "plant_1"), "config", {"name": "plant_1"}
+        )
 
         def complete_operation() -> None:
             time.sleep(0.02)
@@ -1974,61 +2054,37 @@ def test_cli_pings_device(capsys) -> None:
         assert "plant_1: online" in output.out
 
 
-def test_cli_add_discovers_device_without_writing_config(capsys) -> None:
-    class OnlineApi:
+def test_cli_add_writes_backend_only_without_contacting_device(capsys) -> None:
+    class ForbiddenApi:
         def request_json(self, base_url, path, method, payload=None):
-            assert (base_url, path, method) == ("http://192.168.1.10", "/watering", "GET")
-            return {
-                "device": {"type": "tank", "name": "remote_tank"},
-                "config": {
-                    "dry_weight_g": 120,
-                    "wet_weight_g": 510,
-                    "watering_loss_threshold_percent": 35,
-                },
-            }
+            raise AssertionError("manual backend registration must not contact the MCU")
 
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.api = OnlineApi()
+        app.api = ForbiddenApi()
 
         assert app.run(["devices", "add", "192.168.1.10", "local_name", "--type", "plant"]) == 0
 
         output = capsys.readouterr()
-        assert "name: remote_tank" in output.out
-        assert "device_type: tank" in output.out
-        assert "address: 192.168.1.10" in output.out
-        assert "registered without changing device config" in output.out
-        assert app.registry.get("remote_tank").device_type == "tank"
-        settings = app.registry.watering_settings("remote_tank")
-        assert settings["dry_weight_g"] == 120
-        assert settings["wet_weight_g"] == 510
-        assert settings["watering_loss_threshold_percent"] == 35
-        assert settings["dry_weight_updated_at"] is not None
-        assert settings["wet_weight_updated_at"] is not None
-        assert settings["watering_loss_threshold_updated_at"] is not None
-        assert "imported watering settings" in output.out
+        assert "registered in backend only: local_name (plant)" in output.out
+        assert app.registry.get("local_name").device_type == "plant"
         assert app.queue.list() == []
 
 
-def test_interactive_add_does_not_prompt_for_config_when_device_responds(monkeypatch, capsys) -> None:
-    class OnlineApi:
-        def request_json(self, base_url, path, method, payload=None):
-            return {"device": {"type": "plant", "name": "balcony"}}
-
+def test_interactive_add_collects_backend_fields_without_contacting_device(monkeypatch, capsys) -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.api = OnlineApi()
-        answers = iter(["192.168.1.12"])
+        answers = iter(["192.168.1.12", "", "balcony"])
         monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
         app.interactive_register_device()
 
         assert app.registry.get("balcony").ip == "192.168.1.12"
         assert app.queue.list() == []
-        assert "registered without changing device config" in capsys.readouterr().out
+        assert "registered in backend only" in capsys.readouterr().out
 
 
-def test_cli_add_offline_device_requires_confirmation(monkeypatch, capsys) -> None:
+def test_cli_add_does_not_probe_offline_device(capsys) -> None:
     class OfflineApi:
         def request_json(self, base_url, path, method, payload=None):
             raise smart_core.RetryableDeviceApiError("device sleeping")
@@ -2036,36 +2092,24 @@ def test_cli_add_offline_device_requires_confirmation(monkeypatch, capsys) -> No
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         app.api = OfflineApi()
-        monkeypatch.setattr("builtins.input", lambda _prompt: "n")
-
         assert app.run(["devices", "add", "192.168.1.10", "plant_1"]) == 0
-
-        output = capsys.readouterr().out
-        assert "device is not powered on or is sleeping" in output
-        assert "device_type and name" in output
-        assert "cancelled" in output
-        assert app.registry.list() == []
+        assert app.registry.get("plant_1").ip == "192.168.1.10"
         assert app.queue.list() == []
 
 
-def test_cli_add_offline_device_continues_after_confirmation(monkeypatch, capsys) -> None:
-    class OfflineApi:
-        def request_json(self, base_url, path, method, payload=None):
-            raise smart_core.RetryableDeviceApiError("device sleeping")
-
+def test_cli_discover_queues_only_read_request(capsys) -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.api = OfflineApi()
-        monkeypatch.setattr("builtins.input", lambda _prompt: "yes")
-
-        assert app.run(["devices", "add", "192.168.1.10", "plant_1", "--no-wait"]) == 0
+        assert app.run(["devices", "discover", "192.168.1.10"]) == 0
 
         commands = app.queue.list()
         assert len(commands) == 1
-        assert commands[0].path == "/config"
-        assert commands[0].payload["device_type"] == "plant"
-        assert commands[0].payload["name"] == "plant_1"
-        assert "registered: plant_1 (plant) 192.168.1.10" in capsys.readouterr().out
+        assert commands[0].method == "GET"
+        assert commands[0].path == "/watering"
+        assert commands[0].payload is None
+        assert commands[0].device_name.startswith("discovery:")
+        assert app.registry.list() == []
+        assert "discovery is read-only" in capsys.readouterr().out
 
 
 def test_cli_can_defer_offline_device_discovery_to_worker(capsys) -> None:
@@ -2090,9 +2134,7 @@ def test_cli_can_defer_offline_device_discovery_to_worker(capsys) -> None:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         app.api = SleepingThenOnlineApi()
 
-        assert app.run([
-            "devices", "add", "192.168.1.14", "--when-offline", "defer"
-        ]) == 0
+        assert app.run(["devices", "discover", "192.168.1.14"]) == 0
         assert app.registry.list() == []
         assert len(app.queue.list()) == 1
 
@@ -2107,13 +2149,13 @@ def test_cli_can_defer_offline_device_discovery_to_worker(capsys) -> None:
         worker.run()
 
         device = app.registry.get("sleepy_plant")
-        settings = app.registry.watering_settings(device.name)
+        settings = app.registry.watering_settings(device.id)
         assert device.ip == "192.168.1.14"
         assert settings["dry_weight_g"] == 140
         assert settings["wet_weight_g"] == 520
         assert settings["watering_loss_threshold_percent"] == 30
         assert app.queue.list() == []
-        assert "queued discovery" in capsys.readouterr().out
+        assert "discovery is read-only" in capsys.readouterr().out
 
 
 def test_deferred_discovery_uses_normal_worker_timeout() -> None:
@@ -2141,7 +2183,46 @@ def test_deferred_discovery_uses_normal_worker_timeout() -> None:
         assert app.registry.list() == []
 
 
-def test_explicit_offline_configuration_supersedes_pending_discovery(capsys) -> None:
+def test_worker_rejects_unsafe_discovery_command_before_network_call() -> None:
+    class ForbiddenApi:
+        def request_json(self, base_url, path, method, payload=None):
+            raise AssertionError("unsafe discovery must be rejected before MCU I/O")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        operation_id = app.operations.create(
+            None,
+            "device_discovery",
+            {"base_url": "http://192.168.1.17"},
+            target_label="discovery:http://192.168.1.17",
+        )
+        app.queue.enqueue(
+            operation_id,
+            None,
+            "http://192.168.1.17",
+            "/config",
+            "POST",
+            {"name": "must_not_be_written"},
+            "corrupt discovery write",
+            target_label="discovery:http://192.168.1.17",
+        )
+        worker = smart_core.BackgroundWorker(
+            ForbiddenApi(),
+            app.queue,
+            app.operations,
+            smart_core.WorkerState(str(Path(temp_dir) / "worker.pid")),
+            retry_interval_sec=0,
+            max_wait_sec=1,
+        )
+
+        worker.run()
+
+        assert app.operations.detail(operation_id)["status"] == "error"
+        assert app.queue.list() == []
+        assert app.registry.list() == []
+
+
+def test_manual_registration_never_converts_pending_discovery_to_write(capsys) -> None:
     class SleepingApi:
         def request_json(self, base_url, path, method, payload=None):
             raise smart_core.RetryableDeviceApiError("device sleeping")
@@ -2153,15 +2234,15 @@ def test_explicit_offline_configuration_supersedes_pending_discovery(capsys) -> 
 
         assert app.run([
             "devices", "add", "192.168.1.16", "replacement", "--type", "plant",
-            "--when-offline", "configure", "--no-wait",
         ]) == 0
 
         commands = app.queue.list()
         assert len(commands) == 1
-        assert commands[0].path == "/config"
-        assert commands[0].device_name == "replacement"
-        assert app.operations.detail(discovery_id)["status"] == "cancelled"
-        assert "cancelled pending discovery" in capsys.readouterr().out
+        assert commands[0].method == "GET"
+        assert commands[0].path == "/watering"
+        assert commands[0].payload is None
+        assert app.operations.detail(discovery_id)["status"] == "queued"
+        assert app.registry.get("replacement").name == "replacement"
 
 
 def test_interactive_device_action_reports_missing_devices(monkeypatch, capsys) -> None:
@@ -2191,10 +2272,12 @@ def test_worker_records_all_failed_send_stages() -> None:
         operations = smart_core.OperationLog(store)
         queue = smart_core.CommandQueue(store)
         state = smart_core.WorkerState(str(Path(temp_dir) / "worker.pid"))
-        operation_id = operations.create("plant_1", "config", {"name": "plant_1"})
+        operation_id = operations.create(
+            registered_device_id(store, "plant_1"), "config", {"name": "plant_1"}
+        )
         queue.enqueue(
             operation_id,
-            "plant_1",
+            registered_device_id(store, "plant_1"),
             "http://device",
             "/config",
             "POST",
@@ -2241,11 +2324,15 @@ def test_per_device_worker_does_not_block_other_devices() -> None:
         operations = smart_core.OperationLog(store)
         queue = smart_core.CommandQueue(store)
         state = smart_core.WorkerState(str(Path(temp_dir) / "worker.pid"))
-        plant_1_operation_id = operations.create("plant_1", "watering_start", {"target_g": 100})
-        plant_2_operation_id = operations.create("plant_2", "config", {"name": "plant_2"})
+        plant_1_operation_id = operations.create(
+            registered_device_id(store, "plant_1"), "watering_start", {"target_g": 100}
+        )
+        plant_2_operation_id = operations.create(
+            registered_device_id(store, "plant_2"), "config", {"name": "plant_2"}
+        )
         queue.enqueue(
             plant_1_operation_id,
-            "plant_1",
+            registered_device_id(store, "plant_1"),
             "http://plant-1",
             "/watering/start",
             "POST",
@@ -2254,7 +2341,7 @@ def test_per_device_worker_does_not_block_other_devices() -> None:
         )
         queue.enqueue(
             plant_2_operation_id,
-            "plant_2",
+            registered_device_id(store, "plant_2"),
             "http://plant-2",
             "/config",
             "POST",
@@ -2311,11 +2398,15 @@ def test_retryable_watering_start_moves_behind_same_device_queue() -> None:
         operations = smart_core.OperationLog(store)
         queue = smart_core.CommandQueue(store)
         state = smart_core.WorkerState(str(Path(temp_dir) / "worker.pid"))
-        start_operation_id = operations.create("plant_1", "watering_start", {"target_g": 100})
-        config_operation_id = operations.create("plant_1", "config", {"name": "plant_1"})
+        start_operation_id = operations.create(
+            registered_device_id(store, "plant_1"), "watering_start", {"target_g": 100}
+        )
+        config_operation_id = operations.create(
+            registered_device_id(store, "plant_1"), "config", {"name": "plant_1"}
+        )
         queue.enqueue(
             start_operation_id,
-            "plant_1",
+            registered_device_id(store, "plant_1"),
             "http://plant-1",
             "/watering/start",
             "POST",
@@ -2324,7 +2415,7 @@ def test_retryable_watering_start_moves_behind_same_device_queue() -> None:
         )
         queue.enqueue(
             config_operation_id,
-            "plant_1",
+            registered_device_id(store, "plant_1"),
             "http://plant-1",
             "/config",
             "POST",
@@ -2360,10 +2451,12 @@ def test_worker_records_invalid_device_url_as_operation_error() -> None:
         operations = smart_core.OperationLog(store)
         queue = smart_core.CommandQueue(store)
         state = smart_core.WorkerState(str(Path(temp_dir) / "worker.pid"))
-        operation_id = operations.create("plant_1", "config", {"name": "plant_1"})
+        operation_id = operations.create(
+            registered_device_id(store, "plant_1"), "config", {"name": "plant_1"}
+        )
         queue.enqueue(
             operation_id,
-            "plant_1",
+            registered_device_id(store, "plant_1"),
             "http://ÑŽ",
             "/config",
             "POST",
@@ -2436,8 +2529,11 @@ def test_normalize_operation_status_uses_simple_lifecycle() -> None:
 
 def test_callback_received_ack_does_not_mark_operation_error() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
-        operations = smart_core.OperationLog(make_store(temp_dir))
-        operation_id = operations.create("main_tank", "watering_start", {"target_g": 200})
+        store = make_store(temp_dir)
+        operations = smart_core.OperationLog(store)
+        operation_id = operations.create(
+            registered_device_id(store, "main_tank"), "watering_start", {"target_g": 200}
+        )
 
         operations.event(operation_id, "sending", "worker picked operation")
         operations.event(operation_id, callback_utils.normalize_operation_status("received"), "accepted")
@@ -2449,8 +2545,11 @@ def test_callback_received_ack_does_not_mark_operation_error() -> None:
 
 def test_misclassified_error_accepted_event_is_reported_as_ack() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
-        operations = smart_core.OperationLog(make_store(temp_dir))
-        operation_id = operations.create("main_tank", "watering_start", {"target_g": 200})
+        store = make_store(temp_dir)
+        operations = smart_core.OperationLog(store)
+        operation_id = operations.create(
+            registered_device_id(store, "main_tank"), "watering_start", {"target_g": 200}
+        )
 
         operations.event(operation_id, "error", "accepted")
 
@@ -2474,10 +2573,12 @@ def test_worker_does_not_mark_success_without_callback() -> None:
         operations = smart_core.OperationLog(store)
         queue = smart_core.CommandQueue(store)
         state = smart_core.WorkerState(str(Path(temp_dir) / "worker.pid"))
-        operation_id = operations.create("plant_1", "config", {"name": "plant_1"})
+        operation_id = operations.create(
+            registered_device_id(store, "plant_1"), "config", {"name": "plant_1"}
+        )
         queue.enqueue(
             operation_id,
-            "plant_1",
+            registered_device_id(store, "plant_1"),
             "http://device",
             "/config",
             "POST",
@@ -2517,10 +2618,12 @@ def test_worker_retries_config_command_after_retryable_error() -> None:
         operations = smart_core.OperationLog(store)
         queue = smart_core.CommandQueue(store)
         state = smart_core.WorkerState(str(Path(temp_dir) / "worker.pid"))
-        operation_id = operations.create("plant_1", "config", {"name": "plant_1"})
+        operation_id = operations.create(
+            registered_device_id(store, "plant_1"), "config", {"name": "plant_1"}
+        )
         queue.enqueue(
             operation_id,
-            "plant_1",
+            registered_device_id(store, "plant_1"),
             "http://device",
             "/config",
             "POST",
@@ -2554,10 +2657,12 @@ def test_worker_supervisor_times_out_accepted_operation_without_callback() -> No
         operations = smart_core.OperationLog(store)
         queue = smart_core.CommandQueue(store)
         state = smart_core.WorkerState(str(Path(temp_dir) / "worker.pid"))
-        operation_id = operations.create("plant_1", "config", {"name": "plant_1"})
+        operation_id = operations.create(
+            registered_device_id(store, "plant_1"), "config", {"name": "plant_1"}
+        )
         queue.enqueue(
             operation_id,
-            "plant_1",
+            registered_device_id(store, "plant_1"),
             "http://device",
             "/config",
             "POST",
@@ -2589,7 +2694,7 @@ def test_worker_supervisor_times_out_accepted_operation_without_callback() -> No
 def test_callback_access_log_includes_request_status_and_detail(capsys) -> None:
     class Operations:
         def get(self, operation_id):
-            return {"device_name": "plant", "operation_type": "fill"}
+            return {"device_id": "device-id", "device_name": "plant", "operation_type": "fill"}
 
         def event(self, operation_id, status, detail):
             pass
@@ -2618,6 +2723,7 @@ def test_callback_log_includes_operation_context(capsys) -> None:
             assert operation_id == "op-1"
             return {
                 "operation_id": "op-1",
+                "device_id": "device-id",
                 "device_name": "main_tank",
                 "operation_type": "fill",
             }
@@ -2644,17 +2750,18 @@ def test_callback_log_includes_operation_context(capsys) -> None:
     output = capsys.readouterr().out
     assert '192.168.1.22 "POST /operations/callback" 200' in output
     assert "operation_id=op-1" in output
-    assert "device=main_tank" in output
+    assert "device_id=device-id" in output
+    assert "device_name=main_tank" in output
     assert "operation_type=fill" in output
     assert "status=error" in output
     assert 'detail="pump start failed"' in output
 
 
-def test_successful_sleep_callback_patches_latest_snapshot_before_worker_ack() -> None:
+def test_successful_sleep_callback_records_runtime_patch_without_mutating_snapshot() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("192.168.1.10", "plant", "plant_1")
-        snapshot_id = app.operations.create("plant_1", "device_status", {})
+        device = app.registry.add("192.168.1.10", "plant", "plant_1")
+        snapshot_id = app.operations.create(device.id, "device_status", {})
         app.operations.update_result(snapshot_id, {
             "device": {"name": "plant_1", "type": "plant"},
             "config": {"sleep_disabled": True, "sleep_interval_min": 20},
@@ -2672,25 +2779,24 @@ def test_successful_sleep_callback_patches_latest_snapshot_before_worker_ack() -
         app.operations.event(operation_id, "accepted", "device accepted command")
 
         operation = app.operations.get(operation_id)
-        snapshot = app.operations.latest_successful_result("plant_1", "device_status")
+        snapshot = app.operations.latest_successful_result(device.id, "device_status")
         assert operation["status"] == "success"
         assert snapshot["result"]["config"] == {
-            "sleep_disabled": False,
+            "sleep_disabled": True,
             "sleep_interval_min": 20,
         }
-        assert any(
-            event["event_type"] == "snapshot.patched"
-            and event["data"]["source_operation_id"] == operation_id
-            for event in app.operations.events(snapshot_id)
+        patches = app.operations.confirmed_snapshot_patches_since(
+            device.id, snapshot["updated_at"]
         )
+        assert patches[-1]["patch"] == {"config": {"sleep_disabled": False}}
 
 
 def test_operation_trace_contains_structured_events_and_redacts_callback_url(capsys) -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("192.168.1.10", "plant", "plant_1")
+        device = app.registry.add("192.168.1.10", "plant", "plant_1")
         operation_id = app.operations.create(
-            "plant_1", "config", {"callback_url": "http://secret/callback", "dry_weight_g": 120}
+            device.id, "config", {"callback_url": "http://secret/callback", "dry_weight_g": 120}
         )
         app.operations.trace_event(
             operation_id, "worker", "command.picked", "worker picked operation",
@@ -3007,7 +3113,7 @@ def test_public_api_google_login_requires_allowed_account(monkeypatch) -> None:
         handler.do_POST()
 
         assert handler.responses == [403]
-        assert public_api_response_body(handler)["error"] == "google_account_not_allowed"
+        assert public_api_response_body(handler)["error"]["code"] == "google_account_not_allowed"
 
 
 def test_public_api_requires_bearer_token() -> None:
@@ -3018,7 +3124,7 @@ def test_public_api_requires_bearer_token() -> None:
         handler.do_GET()
 
         assert handler.responses == [401]
-        assert public_api_response_body(handler)["error"] == "missing_token"
+        assert public_api_response_body(handler)["error"]["code"] == "missing_token"
 
 
 def test_public_api_does_not_expose_device_health() -> None:
@@ -3036,7 +3142,7 @@ def test_public_api_does_not_expose_device_health() -> None:
         handler.do_GET()
 
         assert handler.responses == [404]
-        assert public_api_response_body(handler)["error"] == "not_found"
+        assert public_api_response_body(handler)["error"]["code"] == "not_found"
 
 
 def test_public_api_status_latest_returns_none_without_snapshot_without_live_request() -> None:
@@ -3053,9 +3159,10 @@ def test_public_api_status_latest_returns_none_without_snapshot_without_live_req
         app.api = UnexpectedLiveStatusApi()
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
-        body = service.project_snapshot_device_state("plant_1")
+        body = service.project_snapshot_device_state(app.registry.get("plant_1").id)
         assert body == {
-            "device": "plant_1",
+                "device_id": app.registry.get("plant_1").id,
+                "device_name": "plant_1",
             "status": "offline",
             "source": "none",
             "available": False,
@@ -3102,7 +3209,7 @@ def test_public_api_status_latest_returns_minimal_snapshot_result() -> None:
         worker.run()
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
-        body = service.project_snapshot_device_state("plant_1")
+        body = service.project_snapshot_device_state(app.registry.get("plant_1").id)
         assert body["status"] == "offline"
         assert body["source"] == "snapshot"
         assert body["available"] is True
@@ -3154,7 +3261,7 @@ def test_public_api_status_live_returns_live_result() -> None:
         app.api = LiveStatusApi()
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
-        body = service.project_live_device_state("plant_1")
+        body = service.project_live_device_state(app.registry.get("plant_1").id)
         assert body["source"] == "live"
         assert body["available"] is True
         assert body["result"]["device"]["name"] == "plant_1"
@@ -3197,7 +3304,7 @@ def test_public_api_status_latest_returns_snapshot_without_live_request() -> Non
         app.api = StatusApi(False)
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
-        body = service.project_snapshot_device_state("plant_1")
+        body = service.project_snapshot_device_state(app.registry.get("plant_1").id)
         assert body["status"] == "offline"
         assert body["source"] == "snapshot"
         assert body["available"] is True
@@ -3250,9 +3357,10 @@ def test_public_api_status_live_does_not_fall_back_to_snapshot() -> None:
         app.api = StatusApi(False)
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
-        body = service.project_live_device_state("plant_1")
+        body = service.project_live_device_state(app.registry.get("plant_1").id)
         assert body == {
-            "device": "plant_1",
+                "device_id": app.registry.get("plant_1").id,
+                "device_name": "plant_1",
             "status": "offline",
             "source": "none",
             "available": False,
@@ -3279,7 +3387,7 @@ def test_public_api_status_latest_does_not_mix_pending_operation_without_snapsho
         app.queue_device_status("plant_1")
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
-        body = service.project_snapshot_device_state("plant_1")
+        body = service.project_snapshot_device_state(app.registry.get("plant_1").id)
         assert body["source"] == "none"
         assert body["available"] is False
         assert "pending_operation_id" not in body
@@ -3319,7 +3427,7 @@ def test_public_api_status_latest_does_not_mix_pending_operation_with_snapshot()
         app.api = StatusApi(False)
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
-        body = service.project_snapshot_device_state("plant_1")
+        body = service.project_snapshot_device_state(app.registry.get("plant_1").id)
         assert body["source"] == "snapshot"
         assert body["available"] is True
         assert body["operation_id"] == completed_operation_id

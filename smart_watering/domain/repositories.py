@@ -14,6 +14,7 @@ from smart_watering.infrastructure.database import (
 )
 from .foundation import (
     CONFIG_FLOAT_KEYS,
+    DISCOVERY_DEVICE_PREFIX,
     DEVICE_TYPES,
     OP_ACCEPTED,
     OP_CANCELLED,
@@ -155,8 +156,8 @@ class DeviceRegistry:
 
         return self.get(backend_name)
 
-    def validate_config_update(self, current_name: str, config: dict[str, Any]) -> Device:
-        device = self.get(current_name)
+    def validate_config_update(self, device_id: str, config: dict[str, Any]) -> Device:
+        device = self.get_by_id(device_id)
         if "name" in config:
             raise SmartWateringError(
                 "name is not a controller config field; use backend-name or controller-id"
@@ -170,7 +171,7 @@ class DeviceRegistry:
             raise SmartWateringError(f"unsupported device type: {new_type}")
 
         with self.store.session() as session:
-            if new_name != current_name and session.scalar(select(DeviceRecord).where(DeviceRecord.name == new_name)) is not None:
+            if new_name != device.name and session.scalar(select(DeviceRecord).where(DeviceRecord.name == new_name)) is not None:
                 raise DeviceNameConflictError(f"device name already exists: {new_name}")
 
         controller_name = device.controller_name
@@ -179,8 +180,8 @@ class DeviceRegistry:
             device.created_at, time.time(), controller_name,
         )
 
-    def apply_confirmed_config(self, current_name: str, config: dict[str, Any]) -> Device:
-        device = self.get(current_name)
+    def apply_confirmed_config(self, device_id: str, config: dict[str, Any]) -> Device:
+        device = self.get_by_id(device_id)
         new_name = str(config.get("backend_name", device.name)).strip()
         if not new_name:
             raise SmartWateringError("device name must not be empty")
@@ -196,7 +197,7 @@ class DeviceRegistry:
 
             updated = session.get(DeviceRecord, device.id)
             if updated is None:
-                raise SmartWateringError(f"unknown device: {current_name}")
+                raise SmartWateringError(f"unknown device id: {device_id}")
             updated.ip = device.ip
             updated.base_url = device.base_url
             updated.name = new_name
@@ -237,6 +238,16 @@ class DeviceRegistry:
             row.created_at, row.updated_at, row.controller_name,
         )
 
+    def get_by_id(self, device_id: str) -> Device:
+        with self.store.session() as session:
+            row = session.get(DeviceRecord, device_id)
+        if row is None:
+            raise SmartWateringError(f"unknown device id: {device_id}")
+        return Device(
+            row.id, row.name, row.ip, row.base_url, row.device_type,
+            row.created_at, row.updated_at, row.controller_name,
+        )
+
     def is_name_available(self, name: str, current_name: str | None = None) -> bool:
         candidate = name.strip()
         if not candidate:
@@ -254,12 +265,12 @@ class DeviceRegistry:
             )
             return current_id is not None and owner_id == current_id
 
-    def rename_backend(self, current_name: str, new_name: str) -> Device:
+    def rename_backend(self, device_id: str, new_name: str) -> Device:
         candidate = new_name.strip()
         if not candidate:
             raise SmartWateringError("device name must not be empty")
-        device = self.get(current_name)
-        if candidate == current_name:
+        device = self.get_by_id(device_id)
+        if candidate == device.name:
             return device
         now = time.time()
         with self.store.session() as session:
@@ -267,36 +278,36 @@ class DeviceRegistry:
                 raise DeviceNameConflictError(f"device name already exists: {candidate}")
             row = session.get(DeviceRecord, device.id)
             if row is None:
-                raise SmartWateringError(f"unknown device: {current_name}")
+                raise SmartWateringError(f"unknown device id: {device_id}")
             row.name = candidate
             row.updated_at = now
             try:
                 session.flush()
             except IntegrityError as exc:
                 raise DeviceNameConflictError(f"device name already exists: {candidate}") from exc
-        return self.get(candidate)
+        return self.get_by_id(device.id)
 
-    def confirm_controller_name(self, backend_name: str, controller_name: str) -> Device:
-        device = self.get(backend_name)
+    def confirm_controller_name(self, device_id: str, controller_name: str) -> Device:
+        device = self.get_by_id(device_id)
         now = time.time()
         with self.store.session() as session:
             row = session.get(DeviceRecord, device.id)
             if row is None:
-                raise SmartWateringError(f"unknown device: {backend_name}")
+                raise SmartWateringError(f"unknown device id: {device_id}")
             row.controller_name = controller_name
             row.updated_at = now
-        return self.get(backend_name)
+        return self.get_by_id(device.id)
 
-    def remove(self, name: str) -> None:
+    def remove(self, device_id: str) -> None:
         with self.store.session() as session:
-            result = session.execute(delete(DeviceRecord).where(DeviceRecord.name == name))
+            result = session.execute(delete(DeviceRecord).where(DeviceRecord.id == device_id))
             if result.rowcount == 0:
-                raise SmartWateringError(f"unknown device: {name}")
+                raise SmartWateringError(f"unknown device id: {device_id}")
 
-    def watering_settings(self, name: str) -> dict[str, float | None]:
-        self.get(name)
+    def watering_settings(self, device_id: str) -> dict[str, float | None]:
+        self.get_by_id(device_id)
         with self.store.session() as session:
-            row = session.get(DeviceWateringSettingsRecord, self.get(name).id)
+            row = session.get(DeviceWateringSettingsRecord, device_id)
         keys = (
             "dry_weight_g", "dry_weight_updated_at", "wet_weight_g",
             "wet_weight_updated_at", "watering_loss_threshold_percent",
@@ -305,12 +316,11 @@ class DeviceRegistry:
         return {key: getattr(row, key) if row is not None else None for key in keys}
 
     def confirm_watering_settings(
-        self, name: str, config: dict[str, Any], changed_at: float
+        self, device_id: str, config: dict[str, Any], changed_at: float
     ) -> None:
         with self.store.session() as session:
-            device_id = session.scalar(select(DeviceRecord.id).where(DeviceRecord.name == name))
-            if device_id is None:
-                raise SmartWateringError(f"unknown device: {name}")
+            if session.get(DeviceRecord, device_id) is None:
+                raise SmartWateringError(f"unknown device id: {device_id}")
             row = session.get(DeviceWateringSettingsRecord, device_id)
             if row is None:
                 row = DeviceWateringSettingsRecord(device_id=device_id)
@@ -337,13 +347,6 @@ class PlantWateringEventStore:
     def __init__(self, store: SQLiteStore) -> None:
         self.store = store
 
-    @staticmethod
-    def _device_id(session: Session, name: str) -> str:
-        device_id = session.scalar(select(DeviceRecord.id).where(DeviceRecord.name == name))
-        if device_id is None:
-            raise SmartWateringError(f"unknown device: {name}")
-        return device_id
-
     @classmethod
     def to_mapping(cls, row: PlantWateringEventRecord) -> dict[str, Any]:
         result = record_to_mapping(row, cls.FIELDS)
@@ -352,11 +355,10 @@ class PlantWateringEventStore:
         return result
 
     def upsert_detected(
-        self, device_name: str, event: dict[str, float], detected_at: float | None = None
+        self, device_id: str, event: dict[str, float], detected_at: float | None = None
     ) -> tuple[dict[str, Any], bool]:
         now = detected_at if detected_at is not None else time.time()
         with self.store.session() as session:
-            device_id = self._device_id(session, device_name)
             row = session.scalar(
                 select(PlantWateringEventRecord).where(
                     PlantWateringEventRecord.device_id == device_id,
@@ -402,10 +404,9 @@ class PlantWateringEventStore:
         return self.to_mapping(row), created
 
     def list_valid_page(
-        self, device_name: str, limit: int, offset: int
+        self, device_id: str, limit: int, offset: int
     ) -> tuple[list[dict[str, Any]], bool]:
         with self.store.session() as session:
-            device_id = self._device_id(session, device_name)
             rows = session.scalars(
                 select(PlantWateringEventRecord).where(
                     PlantWateringEventRecord.device_id == device_id,
@@ -417,25 +418,23 @@ class PlantWateringEventStore:
             ).all()
         return [self.to_mapping(row) for row in rows[:limit]], len(rows) > limit
 
-    def list_valid(self, device_name: str) -> list[dict[str, Any]]:
-        rows, _has_more = self.list_valid_page(device_name, 1_000_000, 0)
+    def list_valid(self, device_id: str) -> list[dict[str, Any]]:
+        rows, _has_more = self.list_valid_page(device_id, 1_000_000, 0)
         return rows
 
-    def hard_drop(self, device_name: str | None = None) -> int:
+    def hard_drop(self, device_id: str | None = None) -> int:
         with self.store.session() as session:
             statement = delete(PlantWateringEventRecord)
-            if device_name is not None:
-                device_id = self._device_id(session, device_name)
+            if device_id is not None:
                 statement = statement.where(
                     PlantWateringEventRecord.device_id == device_id
                 )
             result = session.execute(statement)
         return int(result.rowcount or 0)
 
-    def invalidate(self, device_name: str, event_id: int) -> bool:
+    def invalidate(self, device_id: str, event_id: int) -> bool:
         now = time.time()
         with self.store.session() as session:
-            device_id = self._device_id(session, device_name)
             result = session.execute(
                 update(PlantWateringEventRecord).where(
                     PlantWateringEventRecord.id == event_id,
@@ -446,11 +445,10 @@ class PlantWateringEventStore:
         return bool(result.rowcount)
 
     def set_fertilized(
-        self, device_name: str, event_id: int, fertilized: bool
+        self, device_id: str, event_id: int, fertilized: bool
     ) -> dict[str, Any] | None:
         now = time.time()
         with self.store.session() as session:
-            device_id = self._device_id(session, device_name)
             row = session.scalar(
                 select(PlantWateringEventRecord).where(
                     PlantWateringEventRecord.id == event_id,
@@ -465,10 +463,9 @@ class PlantWateringEventStore:
             session.flush()
             return self.to_mapping(row)
 
-    def invalidate_above_amount(self, device_name: str, max_amount_g: float) -> int:
+    def invalidate_above_amount(self, device_id: str, max_amount_g: float) -> int:
         now = time.time()
         with self.store.session() as session:
-            device_id = self._device_id(session, device_name)
             result = session.execute(
                 update(PlantWateringEventRecord).where(
                     PlantWateringEventRecord.device_id == device_id,
@@ -478,9 +475,8 @@ class PlantWateringEventStore:
             )
         return int(result.rowcount or 0)
 
-    def invalidate_exact_duplicates(self, device_name: str) -> int:
+    def invalidate_exact_duplicates(self, device_id: str) -> int:
         with self.store.session() as session:
-            device_id = self._device_id(session, device_name)
             rows = session.scalars(
                 select(PlantWateringEventRecord).where(
                     PlantWateringEventRecord.device_id == device_id
@@ -507,11 +503,10 @@ class PlantWateringEventStore:
         return changed
 
     def invalidate_events_inside(
-        self, device_name: str, start: float, end: float, amount_below: float
+        self, device_id: str, start: float, end: float, amount_below: float
     ) -> int:
         now = time.time()
         with self.store.session() as session:
-            device_id = self._device_id(session, device_name)
             result = session.execute(
                 update(PlantWateringEventRecord).where(
                     PlantWateringEventRecord.device_id == device_id,
@@ -733,7 +728,7 @@ class OperationLog:
         operation = record_to_mapping(
             row,
             (
-                "operation_id", "correlation_id", "causation_id", "device_name",
+                "operation_id", "correlation_id", "causation_id", "device_id", "device_name",
                 "operation_type", "payload_json", "result_json", "status",
                 "created_at", "updated_at",
             ),
@@ -741,8 +736,9 @@ class OperationLog:
         return self.detail_from_operation(operation, [])
 
     def create(
-        self, device_name: str, operation_type: str, payload: dict[str, Any],
+        self, device_id: str | None, operation_type: str, payload: dict[str, Any],
         correlation_id: str | None = None, causation_id: str | None = None,
+        target_label: str | None = None,
     ) -> str:
         operation_id = str(uuid.uuid4())
         correlation_id = correlation_id or operation_id
@@ -750,14 +746,16 @@ class OperationLog:
         payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
         with self.store.session() as session:
-            device_id = session.scalar(select(DeviceRecord.id).where(DeviceRecord.name == device_name))
+            device_name = session.scalar(select(DeviceRecord.name).where(DeviceRecord.id == device_id))
+            if device_id is not None and device_name is None:
+                raise SmartWateringError(f"unknown device id: {device_id}")
             session.add(
                 OperationRecord(
                     operation_id=operation_id,
                     correlation_id=correlation_id,
                     causation_id=causation_id,
                     device_id=device_id,
-                    target_name=device_name if device_id is None else None,
+                    target_name=target_label if device_id is None else None,
                     operation_type=operation_type,
                     payload_json=payload_json,
                     status=OP_QUEUED,
@@ -778,7 +776,8 @@ class OperationLog:
             )
 
         self.log(
-            f"created operation_id={operation_id} device={device_name} "
+            f"created operation_id={operation_id} device_id={device_id} "
+            f"label={device_name or target_label} "
             f"type={self.public_type(operation_type)} status={OP_QUEUED}"
         )
         return operation_id
@@ -870,6 +869,7 @@ class OperationLog:
                 )
                 return
             device_name = row.device_name
+            device_id = row.device_id
             operation_type = row.operation_type
             payload_json = row.payload_json
             session.execute(
@@ -892,31 +892,13 @@ class OperationLog:
             f"event operation_id={operation_id} device={device_name} "
             f"type={self.public_type(operation_type)} status={status} detail={detail!r}"
         )
-        if status == OP_SUCCESS and source == "callback":
-            try:
-                payload = json.loads(payload_json or "{}")
-                patch = self.confirmed_snapshot_patch(
-                    operation_type, payload if isinstance(payload, dict) else {}
-                )
-                if patch is not None and not self.patch_latest_device_snapshot(
-                    device_name, patch, operation_id
-                ):
-                    self.log(
-                        f"snapshot patch skipped operation_id={operation_id} "
-                        f"device={device_name} reason=no_valid_snapshot"
-                    )
-            except json.JSONDecodeError as exc:
-                self.log(
-                    f"snapshot patch skipped operation_id={operation_id} "
-                    f"device={device_name} reason={exc}"
-                )
         if operation_type == "config" and status == OP_SUCCESS:
             try:
                 payload = json.loads(payload_json or "{}")
                 if isinstance(payload, dict):
                     registry = DeviceRegistry(self.store)
-                    confirmed_device = registry.apply_confirmed_config(device_name, payload)
-                    registry.confirm_watering_settings(confirmed_device.name, payload, now)
+                    confirmed_device = registry.apply_confirmed_config(device_id, payload)
+                    registry.confirm_watering_settings(confirmed_device.id, payload, now)
             except (json.JSONDecodeError, SmartWateringError) as exc:
                 self.log(
                     f"confirmed config apply skipped operation_id={operation_id} "
@@ -927,7 +909,7 @@ class OperationLog:
                 payload = json.loads(payload_json or "{}")
                 controller_name = payload.get("name") if isinstance(payload, dict) else None
                 if isinstance(controller_name, str):
-                    DeviceRegistry(self.store).confirm_controller_name(device_name, controller_name)
+                    DeviceRegistry(self.store).confirm_controller_name(device_id, controller_name)
             except (json.JSONDecodeError, SmartWateringError) as exc:
                 self.log(
                     f"controller name apply skipped operation_id={operation_id} "
@@ -939,7 +921,7 @@ class OperationLog:
                 config = result.get("config") if isinstance(result, dict) else None
                 if isinstance(config, dict):
                     DeviceRegistry(self.store).confirm_watering_settings(
-                        device_name, config, now
+                        device_id, config, now
                     )
             except (json.JSONDecodeError, SmartWateringError) as exc:
                 self.log(
@@ -954,12 +936,12 @@ class OperationLog:
             )
         return status == OP_CANCELLED
 
-    def cancel_active_watering_starts(self, device_name: str, detail: str) -> list[str]:
+    def cancel_active_watering_starts(self, device_id: str, detail: str) -> list[str]:
         now = time.time()
         with self.store.session() as session:
             rows = session.scalars(
                 select(OperationRecord).where(
-                    OperationRecord.device_name == device_name,
+                    OperationRecord.device_id == device_id,
                     OperationRecord.operation_type.in_(["fill", "watering_start"]),
                     OperationRecord.status.not_in(OP_TERMINAL_STATUSES),
                 )
@@ -980,17 +962,17 @@ class OperationLog:
         operation_ids = [row.operation_id for row in rows]
         if operation_ids:
             self.log(
-                f"cancelled watering_start device={device_name} count={len(operation_ids)} "
+                f"cancelled watering_start device_id={device_id} count={len(operation_ids)} "
                 f"operation_ids={','.join(operation_ids)} detail={detail!r}"
             )
         return operation_ids
 
-    def cancel_non_terminal(self, device_name: str, detail: str) -> list[str]:
+    def cancel_non_terminal(self, device_id: str, detail: str) -> list[str]:
         now = time.time()
         with self.store.session() as session:
             rows = session.scalars(
                 select(OperationRecord).where(
-                    OperationRecord.device_name == device_name,
+                    OperationRecord.device_id == device_id,
                     OperationRecord.status.not_in(OP_TERMINAL_STATUSES),
                 )
             ).all()
@@ -1010,7 +992,7 @@ class OperationLog:
         operation_ids = [row.operation_id for row in rows]
         if operation_ids:
             self.log(
-                f"cancelled non-terminal operations device={device_name} "
+                f"cancelled non-terminal operations device_id={device_id} "
                 f"count={len(operation_ids)} operation_ids={','.join(operation_ids)} "
                 f"detail={detail!r}"
             )
@@ -1035,58 +1017,6 @@ class OperationLog:
                 .where(OperationRecord.operation_id == operation_id)
                 .values(result_json=result_json, updated_at=now)
             )
-
-    def patch_latest_device_snapshot(
-        self, device_name: str, patch: dict[str, Any], source_operation_id: str
-    ) -> bool:
-        """Apply an MCU-confirmed delta to the latest stored /watering snapshot."""
-        now = time.time()
-        with self.store.session() as session:
-            row = session.scalars(
-                select(OperationRecord)
-                .where(
-                    OperationRecord.device_name == device_name,
-                    OperationRecord.operation_type == "device_status",
-                    OperationRecord.status == OP_SUCCESS,
-                    OperationRecord.result_json.is_not(None),
-                )
-                .order_by(OperationRecord.updated_at.desc())
-                .limit(1)
-            ).first()
-            if row is None:
-                return False
-            try:
-                snapshot = json.loads(row.result_json or "{}")
-            except json.JSONDecodeError:
-                return False
-            if not isinstance(snapshot, dict):
-                return False
-
-            def merge(target: dict[str, Any], delta: dict[str, Any]) -> None:
-                for key, value in delta.items():
-                    current = target.get(key)
-                    if isinstance(current, dict) and isinstance(value, dict):
-                        merge(current, value)
-                    else:
-                        target[key] = value
-
-            merge(snapshot, patch)
-            row.result_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
-            row.updated_at = now
-            session.add(OperationEventRecord(
-                operation_id=row.operation_id,
-                status=OP_SUCCESS,
-                detail="snapshot patched from confirmed controller callback",
-                source="callback",
-                event_type="snapshot.patched",
-                data_json=json.dumps(
-                    {"source_operation_id": source_operation_id, "patch": patch},
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
-                created_at=now,
-            ))
-        return True
 
     @staticmethod
     def confirmed_snapshot_patch(
@@ -1119,6 +1049,7 @@ class OperationLog:
             "operation_id",
             "correlation_id",
             "causation_id",
+            "device_id",
             "device_name",
             "operation_type",
             "payload_json",
@@ -1168,7 +1099,7 @@ class OperationLog:
         if operation is None:
             return []
         fields = (
-            "operation_id", "correlation_id", "causation_id", "device_name",
+            "operation_id", "correlation_id", "causation_id", "device_id", "device_name",
             "operation_type", "status", "created_at", "updated_at",
         )
         with self.store.session() as session:
@@ -1282,7 +1213,9 @@ class OperationLog:
             "operation_id": operation["operation_id"],
             "correlation_id": operation.get("correlation_id", operation["operation_id"]),
             "causation_id": operation.get("causation_id"),
+            "device_id": operation.get("device_id"),
             "device": operation["device_name"],
+            "device_name": operation["device_name"],
             "type": self.public_type(operation["operation_type"]),
             "status": status,
             "target_g": payload.get("target_g"),
@@ -1332,10 +1265,11 @@ class OperationLog:
     def list_recent(
         self,
         limit: int = 20,
-        device_name: str | None = None,
+        device_id: str | None = None,
     ) -> list[dict[str, Any]]:
         fields = (
             "operation_id",
+            "device_id",
             "device_name",
             "operation_type",
             "payload_json",
@@ -1345,17 +1279,18 @@ class OperationLog:
             "updated_at",
         )
         query = select(OperationRecord)
-        if device_name is not None:
-            query = query.where(OperationRecord.device_name == device_name)
+        if device_id is not None:
+            query = query.where(OperationRecord.device_id == device_id)
         with self.store.session() as session:
             rows = session.scalars(
                 query.order_by(OperationRecord.created_at.desc()).limit(limit)
             ).all()
         return [record_to_mapping(row, fields) for row in rows]
 
-    def list_non_terminal(self, device_name: str | None = None) -> list[dict[str, Any]]:
+    def list_non_terminal(self, device_id: str | None = None) -> list[dict[str, Any]]:
         fields = (
             "operation_id",
+            "device_id",
             "device_name",
             "operation_type",
             "payload_json",
@@ -1365,8 +1300,8 @@ class OperationLog:
             "updated_at",
         )
         conditions = [OperationRecord.status.not_in(OP_TERMINAL_STATUSES)]
-        if device_name is not None:
-            conditions.append(OperationRecord.device_name == device_name)
+        if device_id is not None:
+            conditions.append(OperationRecord.device_id == device_id)
         with self.store.session() as session:
             rows = session.scalars(
                 select(OperationRecord)
@@ -1375,27 +1310,60 @@ class OperationLog:
             ).all()
         return [record_to_mapping(row, fields) for row in rows]
 
-    def latest_user_visible_updated_at(self, device_name: str) -> float | None:
+    def list_non_terminal_for_device_id(self, device_id: str) -> list[dict[str, Any]]:
+        fields = (
+            "operation_id",
+            "device_id",
+            "device_name",
+            "operation_type",
+            "payload_json",
+            "result_json",
+            "status",
+            "created_at",
+            "updated_at",
+        )
+        with self.store.session() as session:
+            rows = session.scalars(
+                select(OperationRecord)
+                .where(
+                    OperationRecord.device_id == device_id,
+                    OperationRecord.status.not_in(OP_TERMINAL_STATUSES),
+                )
+                .order_by(OperationRecord.created_at.desc())
+            ).all()
+        return [record_to_mapping(row, fields) for row in rows]
+
+    def latest_user_visible_updated_at(self, device_id: str) -> float | None:
         """Return a revision watermark including operations that just became terminal."""
         with self.store.session() as session:
             return session.scalar(
                 select(func.max(OperationRecord.updated_at)).where(
-                    OperationRecord.device_name == device_name,
+                    OperationRecord.device_id == device_id,
+                    OperationRecord.operation_type != "device_status",
+                )
+            )
+
+    def latest_user_visible_updated_at_for_device_id(self, device_id: str) -> float | None:
+        """Return a card revision watermark for one immutable device identity."""
+        with self.store.session() as session:
+            return session.scalar(
+                select(func.max(OperationRecord.updated_at)).where(
+                    OperationRecord.device_id == device_id,
                     OperationRecord.operation_type != "device_status",
                 )
             )
 
     def devices_with_non_terminal(self, operation_types: set[str]) -> set[str]:
         with self.store.session() as session:
-            device_names = session.scalars(
-                select(OperationRecord.device_name)
+            device_ids = session.scalars(
+                select(OperationRecord.device_id)
                 .where(
                     OperationRecord.operation_type.in_(operation_types),
                     OperationRecord.status.not_in(OP_TERMINAL_STATUSES),
                 )
                 .distinct()
             ).all()
-        return set(device_names)
+        return {device_id for device_id in device_ids if device_id is not None}
 
     def list_recent_watering_starts(self, limit: int = 10, successful_only: bool = False) -> list[dict[str, Any]]:
         fields = (
@@ -1422,12 +1390,12 @@ class OperationLog:
             ).all()
         return [record_to_mapping(row, fields) for row in rows]
 
-    def latest_successful_result(self, device_name: str, operation_type: str) -> dict[str, Any] | None:
+    def latest_successful_result(self, device_id: str, operation_type: str) -> dict[str, Any] | None:
         with self.store.session() as session:
             row = session.scalars(
                 select(OperationRecord)
                 .where(
-                    OperationRecord.device_name == device_name,
+                    OperationRecord.device_id == device_id,
                     OperationRecord.operation_type == operation_type,
                     OperationRecord.status == OP_SUCCESS,
                     OperationRecord.result_json.is_not(None),
@@ -1437,12 +1405,93 @@ class OperationLog:
             ).first()
             return self._detail_without_events(row)
 
-    def latest_non_terminal(self, device_name: str, operation_type: str) -> dict[str, Any] | None:
+    def latest_successful_result_for_device_id(
+        self, device_id: str, operation_type: str
+    ) -> dict[str, Any] | None:
         with self.store.session() as session:
             row = session.scalars(
                 select(OperationRecord)
                 .where(
-                    OperationRecord.device_name == device_name,
+                    OperationRecord.device_id == device_id,
+                    OperationRecord.operation_type == operation_type,
+                    OperationRecord.status == OP_SUCCESS,
+                    OperationRecord.result_json.is_not(None),
+                )
+                .order_by(OperationRecord.updated_at.desc())
+                .limit(1)
+            ).first()
+            return self._detail_without_events(row)
+
+    def confirmed_snapshot_patches_since(
+        self, device_id: str, updated_after: float
+    ) -> list[dict[str, Any]]:
+        """Return confirmed callback deltas without modifying the stored snapshot."""
+        with self.store.session() as session:
+            rows = session.scalars(
+                select(OperationRecord)
+                .where(
+                    OperationRecord.device_id == device_id,
+                    OperationRecord.status == OP_SUCCESS,
+                    OperationRecord.updated_at > updated_after,
+                    OperationRecord.operation_type != "device_status",
+                )
+                .order_by(OperationRecord.updated_at.asc())
+            ).all()
+        result = []
+        for row in rows:
+            try:
+                payload = json.loads(row.payload_json or "{}")
+            except json.JSONDecodeError:
+                continue
+            patch = self.confirmed_snapshot_patch(
+                row.operation_type, payload if isinstance(payload, dict) else {}
+            )
+            if patch is not None:
+                result.append({
+                    "operation_id": row.operation_id,
+                    "updated_at": row.updated_at,
+                    "patch": patch,
+                })
+        return result
+
+    def confirmed_snapshot_patches_since_device_id(
+        self, device_id: str, updated_after: float
+    ) -> list[dict[str, Any]]:
+        """Return confirmed callback deltas for one immutable device identity."""
+        with self.store.session() as session:
+            rows = session.scalars(
+                select(OperationRecord)
+                .where(
+                    OperationRecord.device_id == device_id,
+                    OperationRecord.status == OP_SUCCESS,
+                    OperationRecord.updated_at > updated_after,
+                    OperationRecord.operation_type != "device_status",
+                )
+                .order_by(OperationRecord.updated_at.asc())
+            ).all()
+        result = []
+        for row in rows:
+            try:
+                payload = json.loads(row.payload_json or "{}")
+            except json.JSONDecodeError:
+                continue
+            patch = self.confirmed_snapshot_patch(
+                row.operation_type, payload if isinstance(payload, dict) else {}
+            )
+            if patch is not None:
+                result.append({
+                    "operation_id": row.operation_id,
+                    "updated_at": row.updated_at,
+                    "patch": patch,
+                })
+        return result
+
+    def latest_non_terminal(self, device_id: str, operation_type: str) -> dict[str, Any] | None:
+        with self.store.session() as session:
+            row = session.scalars(
+                select(OperationRecord)
+                .where(
+                    OperationRecord.device_id == device_id,
                     OperationRecord.operation_type == operation_type,
                     OperationRecord.status.not_in(OP_TERMINAL_STATUSES),
                 )
@@ -1451,12 +1500,12 @@ class OperationLog:
             ).first()
             return self._detail_without_events(row)
 
-    def latest_for_device(self, device_name: str, operation_type: str) -> dict[str, Any] | None:
+    def latest_for_device(self, device_id: str, operation_type: str) -> dict[str, Any] | None:
         with self.store.session() as session:
             row = session.scalars(
                 select(OperationRecord)
                 .where(
-                    OperationRecord.device_name == device_name,
+                    OperationRecord.device_id == device_id,
                     OperationRecord.operation_type == operation_type,
                 )
                 .order_by(OperationRecord.updated_at.desc())
@@ -1464,12 +1513,12 @@ class OperationLog:
             ).first()
             return self._detail_without_events(row)
 
-    def latest_non_terminal_watering_start(self, device_name: str) -> dict[str, Any] | None:
+    def latest_non_terminal_watering_start(self, device_id: str) -> dict[str, Any] | None:
         with self.store.session() as session:
             operation_id = session.scalar(
                 select(OperationRecord.operation_id)
                 .where(
-                    OperationRecord.device_name == device_name,
+                    OperationRecord.device_id == device_id,
                     OperationRecord.operation_type.in_(["fill", "watering_start"]),
                     OperationRecord.status.not_in(OP_TERMINAL_STATUSES),
                 )
@@ -1478,12 +1527,12 @@ class OperationLog:
             )
         return self.detail(operation_id) if operation_id is not None else None
 
-    def latest_terminal_watering_start(self, device_name: str) -> dict[str, Any] | None:
+    def latest_terminal_watering_start(self, device_id: str) -> dict[str, Any] | None:
         with self.store.session() as session:
             operation_id = session.scalar(
                 select(OperationRecord.operation_id)
                 .where(
-                    OperationRecord.device_name == device_name,
+                    OperationRecord.device_id == device_id,
                     OperationRecord.operation_type.in_(["fill", "watering_start"]),
                     OperationRecord.status.in_(OP_TERMINAL_STATUSES),
                 )
@@ -1578,20 +1627,23 @@ class CommandQueue:
     def enqueue(
         self,
         operation_id: str,
-        device_name: str,
+        device_id: str | None,
         base_url: str,
         path: str,
         method: str,
         payload: dict[str, Any] | None,
         description: str,
         drop_fill_commands: bool = False,
+        target_label: str | None = None,
     ) -> str:
         payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True) if payload is not None else None
         dedupe_payload_json = self.dedupe_payload_json(payload_json)
         now = time.time()
 
         with self.store.session() as session:
-            device_id = session.scalar(select(DeviceRecord.id).where(DeviceRecord.name == device_name))
+            device_name = session.scalar(select(DeviceRecord.name).where(DeviceRecord.id == device_id))
+            if device_id is not None and device_name is None:
+                raise SmartWateringError(f"unknown device id: {device_id}")
             if drop_fill_commands:
                 session.execute(delete(CommandQueueRecord).where(CommandQueueRecord.path == "/watering/start"))
 
@@ -1607,7 +1659,7 @@ class CommandQueue:
                     self.log(
                         f"enqueue skipped duplicate operation_id={operation_id} "
                         f"existing_operation_id={duplicate.operation_id} "
-                        f"device={device_name} method={method} path={path}"
+                        f"device_id={device_id} method={method} path={path}"
                     )
                     return duplicate.operation_id
 
@@ -1615,7 +1667,7 @@ class CommandQueue:
                 CommandQueueRecord(
                     operation_id=operation_id,
                     device_id=device_id,
-                    target_name=device_name if device_id is None else None,
+                    target_name=target_label if device_id is None else None,
                     base_url=base_url,
                     path=path,
                     method=method,
@@ -1626,7 +1678,8 @@ class CommandQueue:
                 )
             )
         self.log(
-            f"enqueued operation_id={operation_id} device={device_name} "
+            f"enqueued operation_id={operation_id} device_id={device_id} "
+            f"label={device_name or target_label} "
             f"method={method} path={path} description={description!r}"
         )
         OperationLog(self.store).trace_event(
@@ -1635,22 +1688,25 @@ class CommandQueue:
         )
         return operation_id
 
-    def peek(self, device_name: str | None = None) -> QueuedCommand | None:
+    def peek(self, worker_key: str | None = None) -> QueuedCommand | None:
         with self.store.session() as session:
             statement = select(CommandQueueRecord)
-            if device_name is not None:
-                statement = statement.where(CommandQueueRecord.device_name == device_name)
+            if worker_key is not None:
+                if worker_key.startswith(DISCOVERY_DEVICE_PREFIX):
+                    statement = statement.where(CommandQueueRecord.target_name == worker_key)
+                else:
+                    statement = statement.where(CommandQueueRecord.device_id == worker_key)
             row = session.scalars(statement.order_by(CommandQueueRecord.id).limit(1)).first()
         return self._row_to_command(row) if row is not None else None
 
-    def pending_device_names(self) -> list[str]:
+    def pending_worker_keys(self) -> list[str]:
         with self.store.session() as session:
-            rows = session.scalars(
-                select(CommandQueueRecord.device_name)
+            rows = session.execute(
+                select(CommandQueueRecord.device_id, CommandQueueRecord.target_name)
                 .distinct()
-                .order_by(CommandQueueRecord.device_name)
+                .order_by(CommandQueueRecord.device_id, CommandQueueRecord.target_name)
             ).all()
-        return list(rows)
+        return [device_id or target_name for device_id, target_name in rows if device_id or target_name]
 
     def pop(self, command_id: int) -> None:
         with self.store.session() as session:
@@ -1668,7 +1724,7 @@ class CommandQueue:
         self,
         command: QueuedCommand,
         started_at: float,
-        device_name: str | None = None,
+        worker_key: str | None = None,
     ) -> int | None:
         payload_json = (
             json.dumps(command.payload, ensure_ascii=False, sort_keys=True)
@@ -1677,8 +1733,11 @@ class CommandQueue:
         )
         with self.store.session() as session:
             statement = select(CommandQueueRecord.id).where(CommandQueueRecord.id != command.id)
-            if device_name is not None:
-                statement = statement.where(CommandQueueRecord.device_name == device_name)
+            if worker_key is not None:
+                if worker_key.startswith(DISCOVERY_DEVICE_PREFIX):
+                    statement = statement.where(CommandQueueRecord.target_name == worker_key)
+                else:
+                    statement = statement.where(CommandQueueRecord.device_id == worker_key)
             if session.scalar(statement.limit(1)) is None:
                 return None
             row = session.get(CommandQueueRecord, command.id)
@@ -1711,11 +1770,11 @@ class CommandQueue:
         )
         return new_id
 
-    def drop_pending_watering_start(self, device_name: str) -> list[str]:
+    def drop_pending_watering_start(self, device_id: str) -> list[str]:
         with self.store.session() as session:
             rows = session.execute(
                 select(CommandQueueRecord.id, CommandQueueRecord.operation_id).where(
-                    CommandQueueRecord.device_name == device_name,
+                    CommandQueueRecord.device_id == device_id,
                     CommandQueueRecord.path == "/watering/start",
                 )
             ).all()
@@ -1724,16 +1783,16 @@ class CommandQueue:
         operation_ids = [row.operation_id for row in rows]
         if operation_ids:
             self.log(
-                f"dropped watering_start device={device_name} count={len(operation_ids)} "
+                f"dropped watering_start device_id={device_id} count={len(operation_ids)} "
                 f"operation_ids={','.join(operation_ids)}"
             )
         return operation_ids
 
-    def drop_device(self, device_name: str) -> list[str]:
+    def drop_device(self, device_id: str) -> list[str]:
         with self.store.session() as session:
             rows = session.execute(
                 select(CommandQueueRecord.id, CommandQueueRecord.operation_id).where(
-                    CommandQueueRecord.device_name == device_name,
+                    CommandQueueRecord.device_id == device_id,
                 )
             ).all()
             if rows:
@@ -1741,7 +1800,7 @@ class CommandQueue:
         operation_ids = [row.operation_id for row in rows]
         if operation_ids:
             self.log(
-                f"dropped device queue device={device_name} count={len(operation_ids)} "
+                f"dropped device queue device_id={device_id} count={len(operation_ids)} "
                 f"operation_ids={','.join(operation_ids)}"
             )
         return operation_ids

@@ -100,6 +100,48 @@ class SmartWateringCliApp(SmartWateringService):
         self.callback_check_device_wait_sec = CALLBACK_CHECK_DEVICE_WAIT_SEC
         self.callback_check_poll_interval_sec = CALLBACK_CHECK_POLL_INTERVAL_SEC
 
+    def _resolve_cli_device_id(self, selector: str) -> str:
+        """Resolve a human CLI selector once; application services receive only IDs."""
+        try:
+            return self.registry.get_by_id(selector).id
+        except SmartWateringError:
+            return self.registry.get(selector).id
+
+    def clear_device_queue(self, device_selector: str) -> int:
+        return super().clear_device_queue(self._resolve_cli_device_id(device_selector))
+
+    def queue_controller_name(self, device_selector: str, controller_name: str) -> str:
+        return super().queue_controller_name(
+            self._resolve_cli_device_id(device_selector), controller_name
+        )
+
+    def queue_fill(self, device_selector: str, grams: float) -> str:
+        return super().queue_fill(self._resolve_cli_device_id(device_selector), grams)
+
+    def queue_stop(self, device_selector: str) -> str:
+        return super().queue_stop(self._resolve_cli_device_id(device_selector))
+
+    def queue_sleep(self, device_selector: str, enabled: bool) -> str:
+        return super().queue_sleep(self._resolve_cli_device_id(device_selector), enabled)
+
+    def queue_sleep_interval(
+        self, device_selector: str, minutes: int, confirm_retry_duplicate: bool = False
+    ) -> str | None:
+        return super().queue_sleep_interval(
+            self._resolve_cli_device_id(device_selector), minutes, confirm_retry_duplicate
+        )
+
+    def queue_zero(self, device_selector: str) -> str:
+        return super().queue_zero(self._resolve_cli_device_id(device_selector))
+
+    def queue_calibration(self, device_selector: str, weight_g: float) -> str:
+        return super().queue_calibration(
+            self._resolve_cli_device_id(device_selector), weight_g
+        )
+
+    def queue_device_status(self, device_selector: str) -> str:
+        return super().queue_device_status(self._resolve_cli_device_id(device_selector))
+
     @staticmethod
     def format_status(payload: dict[str, Any]) -> str:
         device = payload.get("device", {})
@@ -417,18 +459,15 @@ class SmartWateringCliApp(SmartWateringService):
         devices = subparsers.add_parser("devices", help="Manage registered devices")
         device_subparsers = devices.add_subparsers(dest="device_command")
         add = device_subparsers.add_parser(
-            "add", help="Discover and register a device; configure it only when offline and confirmed"
+            "add", help="Add a backend record without contacting the MCU"
         )
         add.add_argument("ip")
-        add.add_argument("name", nargs="?")
+        add.add_argument("name")
         add.add_argument("--type", choices=sorted(DEVICE_TYPES), default=DeviceType.PLANT)
-        add.add_argument(
-            "--when-offline",
-            choices=("ask", "cancel", "configure", "defer"),
-            default="ask",
-            help="Action when the device is sleeping: cancel, configure it, or defer discovery to the worker",
+        discover = device_subparsers.add_parser(
+            "discover", help="Queue read-only MCU discovery by address"
         )
-        add_wait_argument(add)
+        discover.add_argument("ip")
         device_subparsers.add_parser("list", help="List registered devices")
         remove = device_subparsers.add_parser("remove", help="Remove a registered device")
         remove.add_argument("name")
@@ -601,7 +640,20 @@ class SmartWateringCliApp(SmartWateringService):
         if not ip:
             print("cancelled")
             return
-        self.register_device(ip)
+        device_type = self.prompt_device_type(DeviceType.PLANT)
+        backend_name = self.prompt("Backend name")
+        if not backend_name:
+            print("cancelled")
+            return
+        self.register_device(ip, device_type, backend_name)
+
+    def interactive_discover_device(self) -> None:
+        ip = self.prompt("IP address or base URL")
+        if not ip:
+            print("cancelled")
+            return
+        operation_id = self.discover_device(ip)
+        print(f"queued read-only discovery: operation_id={operation_id}")
 
     @staticmethod
     def discovered_identity(status: dict[str, Any]) -> tuple[str, str]:
@@ -616,69 +668,17 @@ class SmartWateringCliApp(SmartWateringService):
     def register_device(
         self,
         ip_or_url: str,
-        fallback_type: str | None = None,
-        fallback_name: str | None = None,
-        wait: bool = True,
-        when_offline: str = "ask",
+        device_type: str,
+        backend_name: str,
     ) -> bool:
-        _, base_url = self.registry.normalize_base_url(ip_or_url)
-        try:
-            status = self.api.request_json(base_url, "/watering", "GET")
-        except RetryableDeviceApiError as exc:
-            print(f"warning: device is not powered on or is sleeping ({exc})")
-            action = when_offline
-            if action == "ask":
-                print("1. Cancel")
-                print("2. Configure now (overwrites device_type and name when it wakes)")
-                print("3. Let the worker discover and register the device when it wakes")
-                choice = input("Choose [1-3, default 1]: ").strip().lower()
-                action = {
-                    "2": "configure", "y": "configure", "yes": "configure",
-                    "3": "defer",
-                }.get(choice, "cancel")
-            if action == "cancel":
-                print("cancelled")
-                return True
-
-            if action == "defer":
-                operation_id = self.queue_device_discovery(ip_or_url)
-                print(f"queued discovery: operation_id={operation_id} address={base_url}")
-                print("the worker will register the device with its persisted config when it wakes")
-                return True
-
-            cancelled_discoveries = self.cancel_device_discovery(ip_or_url)
-            if cancelled_discoveries:
-                print(
-                    "cancelled pending discovery before configuring device: "
-                    + ", ".join(cancelled_discoveries)
-                )
-            if fallback_type is None:
-                fallback_type = self.prompt_device_type(DeviceType.PLANT)
-                fallback_name = self.prompt("Device name", "") or None
-            device = self.registry.add(ip_or_url, fallback_type, fallback_name)
-            operation_id = self.queue_device_config(
-                device,
-                {"device_type": device.device_type},
-                f"configure {device.name}",
-            )
-            print(f"registered: {device.name} ({device.device_type}) {device.ip}")
-            return self.report_operation(operation_id, wait=wait)
-
-        name, device_type = self.discovered_identity(status)
-        device = self.registry.upsert_discovered(ip_or_url, device_type, name)
-        watering_settings = self.discovered_watering_settings(status)
-        if watering_settings:
-            self.registry.confirm_watering_settings(device.name, watering_settings, time.time())
-        print("device responded with:")
-        print(f"  name: {device.name}")
-        print(f"  device_type: {device.device_type}")
-        print(f"  address: {device.ip}")
-        if watering_settings:
-            print("  imported watering settings: " + ", ".join(
-                f"{key}={value}" for key, value in watering_settings.items()
-            ))
-        print("registered without changing device config")
+        device = self.registry.add(ip_or_url, device_type, backend_name)
+        print(f"registered in backend only: {device.name} ({device.device_type}) {device.ip}")
         return True
+
+    def discover_device(self, ip_or_url: str) -> str:
+        operation_id = self.queue_device_discovery(ip_or_url)
+        print("discovery is read-only; the worker will import the MCU identity and config")
+        return operation_id
 
     def interactive_remove_device(self) -> None:
         device = self.choose_device("Remove device")
@@ -688,7 +688,7 @@ class SmartWateringCliApp(SmartWateringService):
         if confirmation != device.name:
             print("cancelled")
             return
-        self.registry.remove(device.name)
+        self.registry.remove(device.id)
         print(f"removed: {device.name}")
 
     def interactive_configure_device(self) -> None:
@@ -701,7 +701,7 @@ class SmartWateringCliApp(SmartWateringService):
             config["device_type"] = new_type
         new_name = self.prompt("Device name", device.name)
         if new_name != device.name:
-            config["name"] = new_name
+            config["backend_name"] = new_name
         tare_weight_g = self.prompt_float("Tare weight g, empty to keep")
         if tare_weight_g is not None:
             config["tare_weight_g"] = tare_weight_g
@@ -711,7 +711,7 @@ class SmartWateringCliApp(SmartWateringService):
         if not config:
             print("no changes")
             return
-        desired_device = self.registry.validate_config_update(device.name, config)
+        desired_device = self.registry.validate_config_update(device.id, config)
         operation_id = self.queue_device_config(
             device,
             config,
@@ -727,7 +727,7 @@ class SmartWateringCliApp(SmartWateringService):
         if device is None:
             return
         controller_id = self.prompt("New MCU ID", device.controller_name)
-        operation_id = self.queue_controller_name(device.name, controller_id)
+        operation_id = self.queue_controller_name(device.id, controller_id)
         self.report_operation(operation_id)
 
     def _first_received_callback(
@@ -798,7 +798,7 @@ class SmartWateringCliApp(SmartWateringService):
                     operation_id = probe_ids_by_device.get(device.id)
                     if operation_id is None:
                         operation_id = self.operations.create(
-                            device.name,
+                            device.id,
                             "callback_probe",
                             {"device_type": actual_type},
                         )
@@ -900,22 +900,22 @@ class SmartWateringCliApp(SmartWateringService):
         grams = self.prompt_float("Watering target grams", required=True)
         if grams is None:
             return
-        self.report_operation(self.queue_fill(device.name, grams))
+        self.report_operation(self.queue_fill(device.id, grams))
 
     def interactive_stop_watering(self) -> None:
         device = self.choose_device("Stop device")
         if device is not None:
-            self.report_operation(self.queue_stop(device.name))
+            self.report_operation(self.queue_stop(device.id))
 
     def interactive_enable_sleep(self) -> None:
         device = self.choose_device("Enable sleep for")
         if device is not None:
-            self.report_operation(self.queue_sleep(device.name, True))
+            self.report_operation(self.queue_sleep(device.id, True))
 
     def interactive_disable_sleep(self) -> None:
         device = self.choose_device("Disable sleep for")
         if device is not None:
-            self.report_operation(self.queue_sleep(device.name, False))
+            self.report_operation(self.queue_sleep(device.id, False))
 
     def interactive_set_sleep_interval(self) -> None:
         device = self.choose_device("Set sleep interval for")
@@ -923,14 +923,14 @@ class SmartWateringCliApp(SmartWateringService):
             return
         minutes = self.prompt_int("Sleep interval minutes", required=True, max_value=MAX_SLEEP_INTERVAL_MIN)
         if minutes is not None:
-            operation_id = self.queue_sleep_interval(device.name, minutes, confirm_retry_duplicate=True)
+            operation_id = self.queue_sleep_interval(device.id, minutes, confirm_retry_duplicate=True)
             if operation_id is not None:
                 self.report_operation(operation_id)
 
     def interactive_set_zero(self) -> None:
         device = self.choose_device("Set zero for")
         if device is not None:
-            self.report_operation(self.queue_zero(device.name))
+            self.report_operation(self.queue_zero(device.id))
 
     def interactive_calibrate_scale(self) -> None:
         device = self.choose_device("Calibrate scale for")
@@ -938,12 +938,12 @@ class SmartWateringCliApp(SmartWateringService):
             return
         weight_g = self.prompt_float("Known weight g", required=True)
         if weight_g is not None:
-            self.report_operation(self.queue_calibration(device.name, weight_g))
+            self.report_operation(self.queue_calibration(device.id, weight_g))
 
     def interactive_clear_device_queue(self) -> None:
         device = self.choose_device("Clear queue for")
         if device is not None:
-            self.clear_device_queue(device.name)
+            self.clear_device_queue(device.id)
 
     def interactive_show_operations(self) -> None:
         rows = self.operations.list_recent()
@@ -1013,7 +1013,7 @@ class SmartWateringCliApp(SmartWateringService):
         end = datetime.now(timezone.utc)
         start = end - timedelta(days=days)
         results = (
-            [detector.scan_device(device_name, start, end)]
+            [detector.scan_device(self.registry.get(device_name).id, start, end)]
             if device_name
             else detector.scan_all(start, end)
         )
@@ -1037,9 +1037,8 @@ class SmartWateringCliApp(SmartWateringService):
     def hard_drop_detected_watering_history(
         self, device_name: str | None = None
     ) -> int:
-        if device_name is not None:
-            self.registry.get(device_name)
-        deleted = self.plant_waterings.hard_drop(device_name)
+        device_id = self.registry.get(device_name).id if device_name is not None else None
+        deleted = self.plant_waterings.hard_drop(device_id)
         target = device_name or "all devices"
         print(f"hard dropped: {deleted} detected watering records ({target})")
         return deleted
@@ -1078,11 +1077,12 @@ class SmartWateringCliApp(SmartWateringService):
     def run_interactive(self) -> int:
         menus = {
             "1": ("Devices", [
-                ("1", "Add device", self.interactive_register_device),
-                ("2", "List devices", lambda: print(self.format_devices(self.registry.list()))),
-                ("3", "Remove device", self.interactive_remove_device),
-                ("4", "Configure device", self.interactive_configure_device),
-                ("5", "Change MCU ID", self.interactive_change_controller_id),
+                ("1", "Add backend device", self.interactive_register_device),
+                ("2", "Discover device (read-only)", self.interactive_discover_device),
+                ("3", "List devices", lambda: print(self.format_devices(self.registry.list()))),
+                ("4", "Remove device", self.interactive_remove_device),
+                ("5", "Configure device", self.interactive_configure_device),
+                ("6", "Change MCU ID", self.interactive_change_controller_id),
             ]),
             "2": ("Read", [
                 ("1", "Show device status", self.interactive_show_status),
@@ -1139,24 +1139,21 @@ class SmartWateringCliApp(SmartWateringService):
                 return self.run_interactive()
             if args.command == "devices":
                 if args.device_command == "add":
-                    return 0 if self.register_device(
-                        args.ip,
-                        args.type,
-                        args.name,
-                        wait=not args.no_wait,
-                        when_offline=args.when_offline,
-                    ) else 1
+                    return 0 if self.register_device(args.ip, args.type, args.name) else 1
+                if args.device_command == "discover":
+                    self.discover_device(args.ip)
+                    return 0
                 if args.device_command == "list":
                     print(self.format_devices(self.registry.list()))
                     return 0
                 if args.device_command == "remove":
-                    self.registry.remove(args.name)
+                    self.registry.remove(self.registry.get(args.name).id)
                     print(f"removed: {args.name}")
                     return 0
                 if args.device_command == "config":
                     config = parse_config_assignments(args.values)
                     device = self.registry.get(args.name)
-                    desired_device = self.registry.validate_config_update(args.name, config)
+                    desired_device = self.registry.validate_config_update(device.id, config)
                     operation_id = self.queue_device_config(
                         device,
                         config,
@@ -1167,7 +1164,9 @@ class SmartWateringCliApp(SmartWateringService):
                         return 0
                     return 0 if self.report_operation(operation_id, wait=not args.no_wait) else 1
                 if args.device_command == "controller-id":
-                    operation_id = self.queue_controller_name(args.name, args.controller_id)
+                    operation_id = self.queue_controller_name(
+                        self.registry.get(args.name).id, args.controller_id
+                    )
                     return 0 if self.report_operation(operation_id, wait=not args.no_wait) else 1
             if args.command == "status":
                 device = self.registry.get(args.device)
@@ -1187,26 +1186,26 @@ class SmartWateringCliApp(SmartWateringService):
                 print(f"{device.name}: online")
                 return 0
             if args.command == "fill":
-                return 0 if self.report_operation(self.queue_fill(args.device, args.grams), wait=not args.no_wait) else 1
+                return 0 if self.report_operation(self.queue_fill(self.registry.get(args.device).id, args.grams), wait=not args.no_wait) else 1
             if args.command == "stop":
-                return 0 if self.report_operation(self.queue_stop(args.device), wait=not args.no_wait) else 1
+                return 0 if self.report_operation(self.queue_stop(self.registry.get(args.device).id), wait=not args.no_wait) else 1
             if args.command == "sleep":
                 if args.sleep_command == "enable":
-                    return 0 if self.report_operation(self.queue_sleep(args.device, True), wait=not args.no_wait) else 1
+                    return 0 if self.report_operation(self.queue_sleep(self.registry.get(args.device).id, True), wait=not args.no_wait) else 1
                 if args.sleep_command == "disable":
-                    return 0 if self.report_operation(self.queue_sleep(args.device, False), wait=not args.no_wait) else 1
+                    return 0 if self.report_operation(self.queue_sleep(self.registry.get(args.device).id, False), wait=not args.no_wait) else 1
                 if args.sleep_command == "interval":
-                    operation_id = self.queue_sleep_interval(args.device, args.minutes, confirm_retry_duplicate=True)
+                    operation_id = self.queue_sleep_interval(self.registry.get(args.device).id, args.minutes, confirm_retry_duplicate=True)
                     if operation_id is None:
                         return 0
                     return 0 if self.report_operation(operation_id, wait=not args.no_wait) else 1
             if args.command == "zero":
-                return 0 if self.report_operation(self.queue_zero(args.device), wait=not args.no_wait) else 1
+                return 0 if self.report_operation(self.queue_zero(self.registry.get(args.device).id), wait=not args.no_wait) else 1
             if args.command == "calibration":
-                return 0 if self.report_operation(self.queue_calibration(args.device, args.weight_g), wait=not args.no_wait) else 1
+                return 0 if self.report_operation(self.queue_calibration(self.registry.get(args.device).id, args.weight_g), wait=not args.no_wait) else 1
             if args.command == "queue":
                 if args.queue_command == "clear":
-                    self.clear_device_queue(args.device)
+                    self.clear_device_queue(self.registry.get(args.device).id)
                     return 0
             if args.command == "users":
                 if args.user_command == "add":

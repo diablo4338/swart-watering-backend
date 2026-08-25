@@ -134,10 +134,10 @@ class BackgroundWorker:
         self._was_idle = False
 
     @staticmethod
-    def log(message: str, device_name: str | None = None) -> None:
+    def log(message: str, device_label: str | None = None) -> None:
         prefix = "worker"
-        if device_name is not None:
-            prefix = f"{prefix} device={device_name}"
+        if device_label is not None:
+            prefix = f"{prefix} device={device_label}"
         print(f"{prefix}: {message}", flush=True)
 
     @staticmethod
@@ -190,6 +190,7 @@ class BackgroundWorker:
             command.device_name.startswith(DISCOVERY_DEVICE_PREFIX)
             and command.method == "GET"
             and command.path == "/watering"
+            and command.payload is None
         )
 
     def _complete_discovery(self, command: QueuedCommand, response: dict[str, Any]) -> str:
@@ -197,7 +198,7 @@ class BackgroundWorker:
         registry = DeviceRegistry(self.queue.store)
         device = registry.upsert_discovered(command.base_url, device_type, name)
         if settings:
-            registry.confirm_watering_settings(device.name, settings, time.time())
+            registry.confirm_watering_settings(device.id, settings, time.time())
         self.operations.update_payload(
             command.operation_id,
             {"base_url": command.base_url, "discovered_name": name, **settings},
@@ -224,15 +225,15 @@ class BackgroundWorker:
             self.log(f"stopped pid={os.getpid()}")
             self.state.clear()
 
-    def run_until_empty(self, device_name: str | None = None) -> int:
+    def run_until_empty(self, device_id: str | None = None) -> int:
         active_command_id: int | None = None
         active_started_at = 0.0
 
         while True:
-            command = self.queue.peek(device_name)
+            command = self.queue.peek(device_id)
             if command is None:
                 if not self._was_idle:
-                    self.log("queue is empty", device_name)
+                    self.log("queue is empty", device_id)
                     self._was_idle = True
                 return 0
 
@@ -259,6 +260,24 @@ class BackgroundWorker:
             if self.operations.is_cancelled(command.operation_id):
                 self.log(f"cancelled id={command.id} operation_id={command.operation_id}", command.device_name)
                 self.queue.pop(command.id)
+                active_command_id = None
+                active_started_at = 0.0
+                continue
+
+            if command.device_name.startswith(DISCOVERY_DEVICE_PREFIX) and not self._is_discovery(command):
+                self.operations.event(
+                    command.operation_id,
+                    OP_ERROR,
+                    "unsafe discovery command rejected",
+                    source="worker",
+                    event_type="operation.failed",
+                )
+                self.queue.pop(command.id)
+                self.log(
+                    f"rejected unsafe discovery id={command.id} "
+                    f"method={command.method} path={command.path}",
+                    command.device_name,
+                )
                 active_command_id = None
                 active_started_at = 0.0
                 continue
@@ -376,7 +395,7 @@ class BackgroundWorker:
                     active_command_id = None
                     active_started_at = 0.0
                     continue
-                new_id = self.queue.move_to_tail_if_other(command, active_started_at, device_name)
+                new_id = self.queue.move_to_tail_if_other(command, active_started_at, device_id)
                 if new_id is not None:
                     self.log(
                         f"retry deferred id={command.id} new_id={new_id} "
@@ -446,24 +465,24 @@ class DeviceWorkerSupervisor:
                 timed_out = self.operations.timeout_stale_controller_results(self.max_wait_sec)
                 if timed_out:
                     BackgroundWorker.log(f"timed out stale controller results count={timed_out}")
-            device_names = self.queue.pending_device_names()
-            if not device_names:
+            worker_keys = self.queue.pending_worker_keys()
+            if not worker_keys:
                 if not self._was_idle:
                     BackgroundWorker.log("queue is empty")
                     self._was_idle = True
                 return
 
             self._was_idle = False
-            for device_name in device_names:
-                if device_name in self._threads:
+            for worker_key in worker_keys:
+                if worker_key in self._threads:
                     continue
                 thread = threading.Thread(
                     target=self._run_device_worker,
-                    args=(device_name,),
-                    name=f"smart-watering-{device_name}",
+                    args=(worker_key,),
+                    name=f"smart-watering-{worker_key}",
                     daemon=True,
                 )
-                self._threads[device_name] = thread
+                self._threads[worker_key] = thread
                 thread.start()
 
     def wait_for_idle(self) -> None:
@@ -481,8 +500,8 @@ class DeviceWorkerSupervisor:
                     if thread.is_alive()
                 }
 
-    def _run_device_worker(self, device_name: str) -> None:
-        BackgroundWorker.log("device worker started", device_name)
+    def _run_device_worker(self, worker_key: str) -> None:
+        BackgroundWorker.log("device worker started", worker_key)
         try:
             worker = BackgroundWorker(
                 self.api,
@@ -492,9 +511,9 @@ class DeviceWorkerSupervisor:
                 self.retry_interval_sec,
                 self.max_wait_sec,
             )
-            worker.run_until_empty(device_name)
+            worker.run_until_empty(worker_key)
         finally:
-            BackgroundWorker.log("device worker stopped", device_name)
+            BackgroundWorker.log("device worker stopped", worker_key)
 
 
 def detect_callback_base_url(port: int = DEFAULT_NODE_PORT) -> str:

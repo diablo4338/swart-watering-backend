@@ -25,14 +25,14 @@ class DevicePresenceRegistry:
         self._lock = Lock()
         self._states: dict[str, DevicePresence] = {}
 
-    def get(self, device_name: str) -> DevicePresence:
+    def get(self, device_id: str) -> DevicePresence:
         with self._lock:
-            return self._states.get(device_name, DevicePresence())
+            return self._states.get(device_id, DevicePresence())
 
-    def mark_online(self, device_name: str, checked_at: float | None = None) -> None:
+    def mark_online(self, device_id: str, checked_at: float | None = None) -> None:
         now = checked_at if checked_at is not None else time.time()
         with self._lock:
-            self._states[device_name] = DevicePresence(
+            self._states[device_id] = DevicePresence(
                 state="online",
                 checked_at=now,
                 last_online_at=now,
@@ -40,12 +40,12 @@ class DevicePresenceRegistry:
             )
 
     def mark_offline(
-        self, device_name: str, error: str, checked_at: float | None = None
+        self, device_id: str, error: str, checked_at: float | None = None
     ) -> None:
         now = checked_at if checked_at is not None else time.time()
         with self._lock:
-            previous = self._states.get(device_name, DevicePresence())
-            self._states[device_name] = DevicePresence(
+            previous = self._states.get(device_id, DevicePresence())
+            self._states[device_id] = DevicePresence(
                 state="offline",
                 checked_at=now,
                 last_online_at=previous.last_online_at,
@@ -103,6 +103,6 @@ class DevicePresenceMonitor:
                     self.api.request_text, device.base_url, "/healthz", "GET"
                 )
             except Exception as error:
-                self.presence.mark_offline(device.name, str(error))
+                self.presence.mark_offline(device.id, str(error))
             else:
-                self.presence.mark_online(device.name)
+                self.presence.mark_online(device.id)

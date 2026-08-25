@@ -60,7 +60,7 @@ class StatusSnapshotScheduler:
                     f"snapshot already pending device={device.name} operation_id={existing}"
                 )
                 continue
-            operation_id = self.app.queue_device_status(device.name)
+            operation_id = self.app.queue_device_status(device.id)
             queued += 1
             self.log(f"queued device_status device={device.name} operation_id={operation_id}")
         return queued

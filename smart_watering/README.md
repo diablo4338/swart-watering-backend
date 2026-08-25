@@ -60,8 +60,9 @@ python -m smart_watering
 Device registry:
 
 ```bash
-python -m smart_watering devices add 192.168.1.50
-python -m smart_watering devices add 192.168.1.51 --type tank main_tank
+python -m smart_watering devices add 192.168.1.50 plant_1 --type plant
+python -m smart_watering devices add 192.168.1.51 main_tank --type tank
+python -m smart_watering devices discover 192.168.1.52
 python -m smart_watering devices list
 python -m smart_watering devices remove plant_1
 ```
@@ -72,6 +73,8 @@ Default names:
 - tank: `tank`
 
 Device names are unique. The database enforces `devices.name` as the primary key, and the CLI rejects duplicate names instead of overwriting an existing device.
+`devices add` writes only the backend database. `devices discover` queues only a
+read-only `GET /watering`; it never changes the MCU name or configuration.
 Only one `tank` device is allowed. Registering a new tank removes the previous tank record.
 
 Device config:

@@ -79,9 +79,9 @@ class PlantWateringDetector:
             raise SmartWateringError("detection window minutes must be > 0")
 
     def scan_device(
-        self, device_name: str, start: datetime, end: datetime
+        self, device_id: str, start: datetime, end: datetime
     ) -> DetectionResult:
-        device = self.app.registry.get(device_name)
+        device = self.app.registry.get_by_id(device_id)
         if device.device_type != DeviceType.PLANT:
             return DetectionResult(device.name, 0, 0, 0, 0)
         instance = prometheus_instance(device.base_url)
@@ -108,9 +108,9 @@ class PlantWateringDetector:
             chunk_start = chunk_end - overlap
         samples = sorted(samples_by_timestamp.items())
         self.app.plant_waterings.invalidate_above_amount(
-            device.name, self.max_amount_g
+            device.id, self.max_amount_g
         )
-        self.app.plant_waterings.invalidate_exact_duplicates(device.name)
+        self.app.plant_waterings.invalidate_exact_duplicates(device.id)
         events = detect_watering_events(
             samples,
             window_sec=self.window_min * 60,
@@ -127,13 +127,13 @@ class PlantWateringDetector:
         for event in events:
             if event.get("_anomaly_recovery"):
                 self.app.plant_waterings.invalidate_events_inside(
-                    device.name,
+                    device.id,
                     event["event_start_at"],
                     event["occurred_at"],
                     event["amount_g"],
                 )
             _stored, was_created = self.app.plant_waterings.upsert_detected(
-                device.name, event
+                device.id, event
             )
             created += int(was_created)
         return DetectionResult(
@@ -146,7 +146,7 @@ class PlantWateringDetector:
 
     def scan_all(self, start: datetime, end: datetime) -> list[DetectionResult]:
         return [
-            self.scan_device(device.name, start, end)
+            self.scan_device(device.id, start, end)
             for device in self.app.registry.list()
             if device.device_type == DeviceType.PLANT
         ]

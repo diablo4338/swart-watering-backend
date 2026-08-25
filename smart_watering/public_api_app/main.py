@@ -9,7 +9,7 @@ from starlette.exceptions import HTTPException
 from smart_watering.domain import DeviceNameConflictError, SmartWateringError
 from smart_watering.infrastructure.database import DatabaseError
 
-from .errors import PublicApiError
+from .errors import PublicApiError, error_payload
 from .idempotency import IdempotencyMiddleware
 from .routers import app_releases, auth, cards
 from .runtime import ApiRuntime
@@ -50,38 +50,39 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
     async def public_api_error(_request: Request, exc: PublicApiError) -> JSONResponse:
         return JSONResponse(
             status_code=exc.status_code,
-            content={"error": exc.code, "message": str(exc)},
+            content=error_payload(exc.code, str(exc), retryable=exc.retryable),
         )
 
     @app.exception_handler(DeviceNameConflictError)
     async def device_name_conflict(_request: Request, exc: DeviceNameConflictError) -> JSONResponse:
         return JSONResponse(
             status_code=409,
-            content={"error": "device_name_conflict", "message": str(exc)},
+            content=error_payload("device_name_conflict", str(exc)),
         )
 
     @app.exception_handler(DatabaseError)
     async def database_error(_request: Request, _exc: DatabaseError) -> JSONResponse:
         return JSONResponse(
             status_code=503,
-            content={
-                "error": "database_unavailable",
-                "message": "database is temporarily unavailable",
-            },
+            content=error_payload(
+                "database_unavailable",
+                "database is temporarily unavailable",
+                retryable=True,
+            ),
         )
 
     @app.exception_handler(SmartWateringError)
     async def smart_watering_error(_request: Request, exc: SmartWateringError) -> JSONResponse:
         return JSONResponse(
             status_code=400,
-            content={"error": "smart_watering_error", "message": str(exc)},
+            content=error_payload("smart_watering_error", str(exc)),
         )
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
         return JSONResponse(
             status_code=400,
-            content={"error": "invalid_request", "message": str(exc)},
+            content=error_payload("invalid_request", str(exc)),
         )
 
     @app.exception_handler(HTTPException)
@@ -89,11 +90,11 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
         if exc.status_code == 404:
             return JSONResponse(
                 status_code=404,
-                content={"error": "not_found", "message": "not found"},
+                content=error_payload("not_found", "not found"),
             )
         return JSONResponse(
             status_code=exc.status_code,
-            content={"error": "http_error", "message": str(exc.detail)},
+            content=error_payload("http_error", str(exc.detail)),
         )
 
     @app.get("/healthz", tags=["system"])

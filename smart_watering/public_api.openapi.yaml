@@ -152,21 +152,21 @@ paths:
                 title: Response Project Device Catalog Api V3 Devices Get
       security:
       - HTTPBearer: []
-  /api/v3/devices/{device_name}/card:
+  /api/v3/devices/{device_id}/card:
     get:
       tags:
       - device-cards
       summary: Project Card
-      operationId: project_card_api_v3_devices__device_name__card_get
+      operationId: project_card_api_v3_devices__device_id__card_get
       security:
       - HTTPBearer: []
       parameters:
-      - name: device_name
+      - name: device_id
         in: path
         required: true
         schema:
           type: string
-          title: Device Name
+          title: Device Id
       responses:
         '200':
           description: Successful Response
@@ -175,28 +175,28 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
-                title: Response Project Card Api V3 Devices  Device Name  Card Get
+                title: Response Project Card Api V3 Devices  Device Id  Card Get
         '422':
           description: Validation Error
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
-  /api/v3/devices/{device_name}/card/blocks/{block_id}:
+  /api/v3/devices/{device_id}/card/blocks/{block_id}:
     get:
       tags:
       - device-cards
       summary: Project Block
-      operationId: project_block_api_v3_devices__device_name__card_blocks__block_id__get
+      operationId: project_block_api_v3_devices__device_id__card_blocks__block_id__get
       security:
       - HTTPBearer: []
       parameters:
-      - name: device_name
+      - name: device_id
         in: path
         required: true
         schema:
           type: string
-          title: Device Name
+          title: Device Id
       - name: block_id
         in: path
         required: true
@@ -211,7 +211,7 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
-                title: Response Project Block Api V3 Devices  Device Name  Card Blocks  Block
+                title: Response Project Block Api V3 Devices  Device Id  Card Blocks  Block
                   Id  Get
         '422':
           description: Validation Error
@@ -219,21 +219,21 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
-  /api/v3/devices/{device_name}/actions/{action}:
+  /api/v3/devices/{device_id}/actions/{action}:
     post:
       tags:
       - device-cards
       summary: Execute Device Action
-      operationId: execute_device_action_api_v3_devices__device_name__actions__action__post
+      operationId: execute_device_action_api_v3_devices__device_id__actions__action__post
       security:
       - HTTPBearer: []
       parameters:
-      - name: device_name
+      - name: device_id
         in: path
         required: true
         schema:
           type: string
-          title: Device Name
+          title: Device Id
       - name: action
         in: path
         required: true
@@ -256,7 +256,7 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
-                title: Response Execute Device Action Api V3 Devices  Device Name  Actions  Action  Post
+                title: Response Execute Device Action Api V3 Devices  Device Id  Actions  Action  Post
         '422':
           description: Validation Error
           content:

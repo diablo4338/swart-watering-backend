@@ -15,7 +15,8 @@ def format_log_value(value: str) -> str:
 @dataclass(frozen=True)
 class CallbackResult:
     operation_id: str
-    device: str
+    device_id: str | None
+    device_name: str
     operation_type: str
     status: str
     detail: str
@@ -25,7 +26,8 @@ class CallbackResult:
         return " ".join(
             (
                 f"operation_id={self.operation_id}",
-                f"device={self.device}",
+                f"device_id={self.device_id or 'unknown'}",
+                f"device_name={format_log_value(self.device_name)}",
                 f"operation_type={self.operation_type}",
                 f"status={self.status}",
                 f"detail={format_log_value(self.detail)}",
@@ -67,7 +69,8 @@ class CallbackService:
             self.operations.event(operation_id, status, detail)
         return CallbackResult(
             operation_id=operation_id,
-            device=operation["device_name"] if operation else "unknown",
+            device_id=operation["device_id"] if operation else None,
+            device_name=operation["device_name"] if operation else "unknown",
             operation_type=operation["operation_type"] if operation else "unknown",
             status=status,
             detail=detail,

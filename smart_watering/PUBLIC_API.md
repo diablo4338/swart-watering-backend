@@ -32,9 +32,12 @@ backed by active SQLite sessions.
 ## Device cards
 
 - `GET /api/v3/devices`
-- `GET /api/v3/devices/{device_name}/card`
-- `GET /api/v3/devices/{device_name}/card/blocks/{block_id}`
-- `POST /api/v3/devices/{device_name}/actions/{action}`
+- `GET /api/v3/devices/{device_id}/card`
+- `GET /api/v3/devices/{device_id}/card/blocks/{block_id}`
+- `POST /api/v3/devices/{device_id}/actions/{action}`
+
+`device_id` is the immutable UUID from `devices.id`. Mutable backend names and MCU
+identifiers are presentation/configuration data and are never used as resource IDs.
 
 The backend owns device workflows, operation queues, connectivity state, snapshot
 fallback, control schemas, and action URLs. The Android client renders the returned

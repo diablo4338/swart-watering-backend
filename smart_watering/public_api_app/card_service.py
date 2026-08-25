@@ -25,22 +25,22 @@ class DeviceCardService:
         return {
             "devices": [
                 {
-                    "id": device.name,
+                    "id": device.id,
                     "name": device.name,
                     "device_type": device.device_type,
                     "card_profile": f"{device.device_type}.v1",
-                    "card_href": f"/api/v3/devices/{device.name}/card",
+                    "card_href": f"/api/v3/devices/{device.id}/card",
                 }
                 for device in self.business.registry.list()
             ]
         }
 
     def project_card(
-        self, device_name: str, include_deferred_data: bool = False
+        self, device_id: str, include_deferred_data: bool = False
     ) -> dict[str, Any]:
-        device = self.business.registry.get(device_name)
-        operations = self._load_active_operations(device.name)
-        status = self.device_state.project_current_device_state(device.name)
+        device = self.business.registry.get_by_id(device_id)
+        operations = self._load_active_operations(device.id)
+        status = self.device_state.project_current_device_state(device.id)
         control = self._project_control_block(device, status)
         blocks = [
             self._project_overview_block(device, status, include_project_statistics=True),
@@ -57,26 +57,26 @@ class DeviceCardService:
             blocks.append(self._project_tank_watering_block(device, status, operations))
         blocks.append(self._project_operation_queue_block(device, operations))
         return {
-            "device_id": device.name,
+            "device_id": device.id,
             "profile": f"{device.device_type}.v1",
             "schema_version": 1,
             "blocks": blocks,
         }
 
-    def project_block(self, device_name: str, block_id: str) -> dict[str, Any]:
-        device = self.business.registry.get(device_name)
+    def project_block(self, device_id: str, block_id: str) -> dict[str, Any]:
+        device = self.business.registry.get_by_id(device_id)
         if block_id == "operation_queue":
-            operations = self._load_active_operations(device.name)
+            operations = self._load_active_operations(device.id)
             return {
-                "device_id": device.name,
+                "device_id": device.id,
                 "block_revision": self._calculate_block_revision(
-                    {}, operations, self._operation_revision_watermark(device.name)
+                    {}, operations, self._operation_revision_watermark(device.id)
                 ),
                 "block": self._project_operation_queue_block(device, operations),
             }
         if block_id == "watering_history" and device.device_type == "plant":
             return {
-                "device_id": device.name,
+                "device_id": device.id,
                 "block_revision": int(time.time() * 1000),
                 "block": self._project_watering_history_block(device),
             }
@@ -87,12 +87,12 @@ class DeviceCardService:
             supported_snapshot_blocks.add("watering")
         if block_id not in supported_snapshot_blocks:
             raise PublicApiError(
-                f"card block '{block_id}' does not exist for device '{device_name}'",
+                f"card block '{block_id}' does not exist for device id '{device_id}'",
                 404,
                 "card_block_not_found",
             )
-        status = self.device_state.project_current_device_state(device.name)
-        operations = self._load_active_operations(device.name) if block_id == "watering" else []
+        status = self.device_state.project_current_device_state(device.id)
+        operations = self._load_active_operations(device.id) if block_id == "watering" else []
         builders = {
             "overview": lambda: self._project_overview_block(
                 device, status, include_project_statistics=True
@@ -103,20 +103,20 @@ class DeviceCardService:
         }
         block = builders[block_id]()
         return {
-            "device_id": device.name,
+            "device_id": device.id,
             "block_revision": self._calculate_block_revision(status, operations),
             "block": block,
         }
 
     def execute_action(
-        self, device_name: str, action: str, payload: dict[str, Any]
+        self, device_id: str, action: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        device = self.business.registry.get(device_name)
+        device = self.business.registry.get_by_id(device_id)
         accepted = True
 
         if action == "rename-backend":
             name = self._require_string(payload, "name")
-            device = self.business.registry.rename_backend(device.name, name)
+            device = self.business.registry.rename_backend(device.id, name)
         elif action == "set-device-type":
             device_type = self._require_string(payload, "device_type")
             if device_type not in DEVICE_TYPES:
@@ -133,15 +133,15 @@ class DeviceCardService:
             enabled = payload.get("enabled")
             if not isinstance(enabled, bool):
                 raise PublicApiError("enabled must be a boolean", 400, "invalid_enabled")
-            self.business.queue_sleep(device.name, enabled)
+            self.business.queue_sleep(device.id, enabled)
         elif action == "set-sleep-interval":
             minutes = self._require_integer(payload, "minutes", minimum=1)
-            self._require_queued_operation(self.business.queue_sleep_interval(device.name, minutes))
+            self._require_queued_operation(self.business.queue_sleep_interval(device.id, minutes))
         elif action == "capture-zero":
-            self.business.queue_zero(device.name)
+            self.business.queue_zero(device.id)
         elif action == "calibrate":
             self.business.queue_calibration(
-                device.name, self._require_number(payload, "weight_g", minimum=0, exclusive=True)
+                device.id, self._require_number(payload, "weight_g", minimum=0, exclusive=True)
             )
         elif action == "set-watering-parameters":
             values = self._validate_watering_parameters(payload)
@@ -150,17 +150,17 @@ class DeviceCardService:
             ))
         elif action == "start-watering":
             self.business.queue_fill(
-                device.name, self._require_number(payload, "target_g", minimum=0, exclusive=True)
+                device.id, self._require_number(payload, "target_g", minimum=0, exclusive=True)
             )
         elif action == "stop-watering":
-            self.business.queue_stop(device.name)
-        elif action == "refresh-status":
+            self.business.queue_stop(device.id)
+        elif action == "refresh-card":
             try:
-                self.business.request_device_status_snapshot(device.name)
+                self.business.request_device_status_snapshot(device.id)
             except SmartWateringError:
                 accepted = False
             else:
-                self.runtime.presence.mark_online(device.name)
+                self.runtime.presence.mark_online(device.id)
         elif action == "set-watering-fertilized":
             event_id = self._require_integer(payload, "event_id", minimum=1)
             fertilized = payload.get("fertilized")
@@ -169,17 +169,17 @@ class DeviceCardService:
                     "fertilized must be a boolean", 400, "invalid_fertilized"
                 )
             self.device_state.set_watering_history_fertilized(
-                device.name, event_id, fertilized
+                device.id, event_id, fertilized
             )
         elif action == "delete-watering-history-item":
             self.device_state.delete_watering_history_item(
-                device.name, self._require_integer(payload, "event_id", minimum=1)
+                device.id, self._require_integer(payload, "event_id", minimum=1)
             )
         elif action == "cancel-operation":
             operation_id = self._require_string(payload, "operation_id")
             if operation_id not in {
                 operation["operation_id"] for operation in self._load_active_operations(
-                    device.name
+                    device.id
                 )
             }:
                 raise PublicApiError(
@@ -200,19 +200,19 @@ class DeviceCardService:
 
         return {
             "accepted": accepted,
-            "card": self.project_card(device.name, include_deferred_data=True),
+            "card": self.project_card(device.id, include_deferred_data=True),
         }
 
-    def _load_active_operations(self, device_name: str) -> list[dict[str, Any]]:
-        operations = self.business.operations.list_non_terminal(device_name)
+    def _load_active_operations(self, device_id: str) -> list[dict[str, Any]]:
+        operations = self.business.operations.list_non_terminal(device_id)
         return [
             self.business.operations.detail_from_operation(operation, [])
             for operation in operations
             if operation.get("operation_type") != "device_status"
         ]
 
-    def _operation_revision_watermark(self, device_name: str) -> float:
-        return self.business.operations.latest_user_visible_updated_at(device_name) or 0
+    def _operation_revision_watermark(self, device_id: str) -> float:
+        return self.business.operations.latest_user_visible_updated_at(device_id) or 0
 
     def _project_operation_queue_block(
         self, device: Any, operations: list[dict[str, Any]]
@@ -220,6 +220,7 @@ class DeviceCardService:
         items = [
             {
                 "id": operation["operation_id"],
+                "device_id": operation["device_id"],
                 "type": operation["type"],
                 "label": str(operation["type"]).replace("_", " ").title(),
                 "status": operation["status"],
@@ -235,7 +236,7 @@ class DeviceCardService:
                     "style": "danger",
                     "enabled": True,
                     "request": self._advertised_action_request(
-                        f"/api/v3/devices/{device.name}/actions/cancel-operation",
+                        f"/api/v3/devices/{device.id}/actions/cancel-operation",
                         "literal",
                         value={"operation_id": operation["operation_id"]},
                     ),
@@ -254,7 +255,7 @@ class DeviceCardService:
                 "mode": "poll",
                 "interval_ms": 3000,
                 "href": (
-                    f"/api/v3/devices/{device.name}/card/blocks/operation_queue"
+                    f"/api/v3/devices/{device.id}/card/blocks/operation_queue"
                 ),
             },
         }
@@ -309,7 +310,7 @@ class DeviceCardService:
             "refresh": {
                 "mode": "on_open",
                 "href": (
-                    f"/api/v3/devices/{device.name}/card/blocks/watering_history"
+                    f"/api/v3/devices/{device.id}/card/blocks/watering_history"
                 ),
             },
         }
@@ -344,7 +345,7 @@ class DeviceCardService:
                 "tone": "good" if threshold_weight is not None and threshold_weight > 50 else "danger",
             }
             if include_project_statistics:
-                statistics = self._project_statistics(device.name)
+                statistics = self._project_statistics(device.id)
         else:
             gross = weight.get("gross_weight_g")
             tare = config.get("tare_weight_g")
@@ -386,20 +387,20 @@ class DeviceCardService:
             },
             "actions": [{
                 "kind": "action",
-                "id": "refresh_status",
-                "label": "Refresh device status",
+                "id": "refresh_card",
+                "label": "Refresh card",
                 "control_type": "button.v1",
                 "enabled": True,
                 "request": {
                     "method": "POST",
-                    "href": f"/api/v3/devices/{device.name}/actions/refresh-status",
+                    "href": f"/api/v3/devices/{device.id}/actions/refresh-card",
                     "body": {"binding": "none"},
                 },
             }],
             "refresh": {
                 "mode": "poll",
                 "interval_ms": 5000,
-                "href": f"/api/v3/devices/{device.name}/card/blocks/overview",
+                "href": f"/api/v3/devices/{device.id}/card/blocks/overview",
             },
         }
 
@@ -413,12 +414,12 @@ class DeviceCardService:
         controls: list[dict[str, Any]] = [
             self._field_with_commit_action(
                 "backend_name", "Name", "text_input.v1", "string", device.name,
-                f"/api/v3/devices/{device.name}/actions/rename-backend", "name",
+                f"/api/v3/devices/{device.id}/actions/rename-backend", "name",
             ),
             {
                 **self._field_with_commit_action(
                     "device_type", "Device type", "select.v1", "string", applied_device_type,
-                    f"/api/v3/devices/{device.name}/actions/set-device-type", "device_type",
+                    f"/api/v3/devices/{device.id}/actions/set-device-type", "device_type",
                 ),
                 "options": [
                     {"value": str(item), "label": str(item).replace("_", " ").title()}
@@ -430,7 +431,7 @@ class DeviceCardService:
             controls.append(self._field_with_commit_action(
                 "tare_weight_g", "Tare weight", "number_input.v1", "integer",
                 applied_tare,
-                f"/api/v3/devices/{device.name}/actions/set-tare-weight", "tare_weight_g",
+                f"/api/v3/devices/{device.id}/actions/set-tare-weight", "tare_weight_g",
                 unit="g", constraints={"min": 0, "step": 1},
             ))
         controls.extend([
@@ -442,14 +443,14 @@ class DeviceCardService:
                 "value_type": "boolean",
                 "enabled": config.get("sleep_disabled") is not None,
                 "request": self._advertised_action_request(
-                    f"/api/v3/devices/{device.name}/actions/set-sleep",
+                    f"/api/v3/devices/{device.id}/actions/set-sleep",
                     "control_value", property="enabled",
                 ),
             },
             self._field_with_commit_action(
                 "sleep_interval_minutes", "Sleep interval", "number_input.v1", "integer",
                 applied_interval,
-                f"/api/v3/devices/{device.name}/actions/set-sleep-interval", "minutes",
+                f"/api/v3/devices/{device.id}/actions/set-sleep-interval", "minutes",
                 unit="min", constraints={"min": 1, "max": 50, "step": 1},
             ),
             {
@@ -460,7 +461,7 @@ class DeviceCardService:
                 "preset": "zero_capture_hold.v1",
                 "enabled": True,
                 "request": self._advertised_action_request(
-                    f"/api/v3/devices/{device.name}/actions/capture-zero"
+                    f"/api/v3/devices/{device.id}/actions/capture-zero"
                 ),
             },
             {
@@ -481,7 +482,7 @@ class DeviceCardService:
                 "preset": "calibration_hold.v1",
                 "enabled": True,
                 "request": self._advertised_action_request(
-                    f"/api/v3/devices/{device.name}/actions/calibrate",
+                    f"/api/v3/devices/{device.id}/actions/calibrate",
                     "fields", fields=["calibration_weight_g"],
                     properties={"calibration_weight_g": "weight_g"},
                 ),
@@ -506,7 +507,7 @@ class DeviceCardService:
             "refresh": {
                 "mode": "on_open",
                 "interval_ms": None,
-                "href": f"/api/v3/devices/{device.name}/card/blocks/control",
+                "href": f"/api/v3/devices/{device.id}/card/blocks/control",
             },
         }
 
@@ -533,7 +534,7 @@ class DeviceCardService:
                 "kind": "action", "id": "save_watering_parameters", "label": "Save",
                 "control_type": "button.v1", "enabled": True,
                 "request": self._advertised_action_request(
-                    f"/api/v3/devices/{device.name}/actions/set-watering-parameters",
+                    f"/api/v3/devices/{device.id}/actions/set-watering-parameters",
                     "fields",
                     fields=["dry_weight_g", "wet_weight_g", "watering_loss_threshold_percent"],
                 ),
@@ -547,12 +548,12 @@ class DeviceCardService:
             "refresh": {
                 "mode": "on_open",
                 "interval_ms": None,
-                "href": f"/api/v3/devices/{device.name}/card/blocks/watering_parameters",
+                "href": f"/api/v3/devices/{device.id}/card/blocks/watering_parameters",
             },
         }
 
     def _project_watering_history_block(self, device: Any) -> dict[str, Any]:
-        history = self.device_state.project_watering_history(device.name, 50, 0)
+        history = self.device_state.project_watering_history(device.id, 50, 0)
         items = []
         for item in history["waterings"]:
             event_id = item["id"]
@@ -563,7 +564,7 @@ class DeviceCardService:
                         "id": "fertilized", "label": "Fertilized",
                         "control_type": "action_toggle.v1", "value": item["fertilized"],
                         "request": self._advertised_action_request(
-                            f"/api/v3/devices/{device.name}/actions/set-watering-fertilized",
+                            f"/api/v3/devices/{device.id}/actions/set-watering-fertilized",
                             "literal_and_control_value",
                             literal={"event_id": event_id}, property="fertilized",
                         ),
@@ -572,7 +573,7 @@ class DeviceCardService:
                         "id": "delete", "label": "Delete",
                         "control_type": "hold_action.v1", "preset": "history_delete_hold.v1",
                         "request": self._advertised_action_request(
-                            f"/api/v3/devices/{device.name}/actions/delete-watering-history-item",
+                            f"/api/v3/devices/{device.id}/actions/delete-watering-history-item",
                             "literal", value={"event_id": event_id},
                         ),
                     },
@@ -584,7 +585,7 @@ class DeviceCardService:
             "data": {"items": items, "next_offset": history["next_offset"]},
             "refresh": {
                 "mode": "once",
-                "href": f"/api/v3/devices/{device.name}/card/blocks/watering_history",
+                "href": f"/api/v3/devices/{device.id}/card/blocks/watering_history",
             },
         }
 
@@ -601,7 +602,7 @@ class DeviceCardService:
                 "kind": "action", "id": "stop_watering", "label": "Stop",
                 "control_type": "button.v1", "style": "danger", "enabled": True,
                 "request": self._advertised_action_request(
-                    f"/api/v3/devices/{device.name}/actions/stop-watering"
+                    f"/api/v3/devices/{device.id}/actions/stop-watering"
                 ),
             }]
             data = {
@@ -616,7 +617,7 @@ class DeviceCardService:
             controls = [
                 {"kind": "field", "id": "target_g", "label": "Water amount", "control_type": "number_input.v1", "value_type": "decimal", "default": 200, "unit": "g", "constraints": {"min_exclusive": 0}},
                 {"kind": "action", "id": "start_watering", "label": "Start", "control_type": "button.v1", "enabled": True, "request": self._advertised_action_request(
-                    f"/api/v3/devices/{device.name}/actions/start-watering",
+                    f"/api/v3/devices/{device.id}/actions/start-watering",
                     "fields", fields=["target_g"],
                 )},
             ]
@@ -627,7 +628,7 @@ class DeviceCardService:
             "required": True, "schema": {"controls": controls}, "data": data,
             "refresh": {
                 "mode": "poll", "interval_ms": 3000 if active or controller_active else 10000,
-                "href": f"/api/v3/devices/{device.name}/card/blocks/watering",
+                "href": f"/api/v3/devices/{device.id}/card/blocks/watering",
             },
         }
 
@@ -668,19 +669,19 @@ class DeviceCardService:
             - (wet_value - dry_value) * loss_value / 100
         )
 
-    def _project_statistics(self, device_name: str) -> list[dict[str, Any]]:
+    def _project_statistics(self, device_id: str) -> list[dict[str, Any]]:
         now = time.monotonic()
-        cached = self._project_statistics_cache.get(device_name)
+        cached = self._project_statistics_cache.get(device_id)
         if cached is not None and cached[0] > now:
             return cached[1]
         try:
             value = [{
                 "kind": "water_consumption",
-                "days": self.device_state.project_water_consumption(device_name)["days"],
+                "days": self.device_state.project_water_consumption(device_id)["days"],
             }]
         except Exception:
             value = cached[1] if cached is not None else []
-        self._project_statistics_cache[device_name] = (now + 300, value)
+        self._project_statistics_cache[device_id] = (now + 300, value)
         return value
 
     @staticmethod
