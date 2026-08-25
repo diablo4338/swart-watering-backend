@@ -1278,7 +1278,7 @@ def test_snapshotter_queues_status_for_registered_devices() -> None:
         scheduler = snapshotter.StatusSnapshotScheduler(app, interval_sec=60)
 
         assert scheduler.enqueue_once() == 2
-        assert scheduler.enqueue_once() == 2
+        assert scheduler.enqueue_once() == 0
 
         commands = app.queue.list()
         assert [command.device_name for command in commands] == ["plant_1", "plant_2"]
@@ -2650,6 +2650,41 @@ def test_callback_log_includes_operation_context(capsys) -> None:
     assert 'detail="pump start failed"' in output
 
 
+def test_successful_sleep_callback_patches_latest_snapshot_before_worker_ack() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        app.registry.add("192.168.1.10", "plant", "plant_1")
+        snapshot_id = app.operations.create("plant_1", "device_status", {})
+        app.operations.update_result(snapshot_id, {
+            "device": {"name": "plant_1", "type": "plant"},
+            "config": {"sleep_disabled": True, "sleep_interval_min": 20},
+            "watering": {"active": False, "state": "waiting"},
+        })
+        app.operations.event(snapshot_id, "success", "status fetched")
+        operation_id = app.queue_sleep("plant_1", True)
+
+        CallbackService(app.operations).record({
+            "operation_id": operation_id,
+            "status": "success",
+            "detail": "sleep_enabled",
+        })
+        # The HTTP response reaches the worker after the synchronous callback.
+        app.operations.event(operation_id, "accepted", "device accepted command")
+
+        operation = app.operations.get(operation_id)
+        snapshot = app.operations.latest_successful_result("plant_1", "device_status")
+        assert operation["status"] == "success"
+        assert snapshot["result"]["config"] == {
+            "sleep_disabled": False,
+            "sleep_interval_min": 20,
+        }
+        assert any(
+            event["event_type"] == "snapshot.patched"
+            and event["data"]["source_operation_id"] == operation_id
+            for event in app.operations.events(snapshot_id)
+        )
+
+
 def test_operation_trace_contains_structured_events_and_redacts_callback_url(capsys) -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
@@ -3027,8 +3062,6 @@ def test_public_api_status_latest_returns_none_without_snapshot_without_live_req
             "result": None,
             "result_received_at": None,
             "operation_id": None,
-            "pending_operation_id": None,
-            "pending_operation_status": None,
             "error": {
                 "code": "device_status_snapshot_not_found",
                 "message": "no stored status snapshot exists for device 'plant_1'",
@@ -3070,7 +3103,7 @@ def test_public_api_status_latest_returns_minimal_snapshot_result() -> None:
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
         body = service.project_snapshot_device_state("plant_1")
-        assert body["status"] == "unknown"
+        assert body["status"] == "offline"
         assert body["source"] == "snapshot"
         assert body["available"] is True
         assert body["operation_id"] == operation_id
@@ -3165,11 +3198,10 @@ def test_public_api_status_latest_returns_snapshot_without_live_request() -> Non
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
         body = service.project_snapshot_device_state("plant_1")
+        assert body["status"] == "offline"
         assert body["source"] == "snapshot"
         assert body["available"] is True
         assert body["operation_id"] == operation_id
-        assert body["pending_operation_id"] is None
-        assert body["pending_operation_status"] is None
         assert "pending_operation_url" not in body
         assert body["result"]["config"] == {
             "target_g": None,
@@ -3227,8 +3259,6 @@ def test_public_api_status_live_does_not_fall_back_to_snapshot() -> None:
             "result": None,
             "result_received_at": None,
             "operation_id": None,
-            "pending_operation_id": None,
-            "pending_operation_status": None,
             "error": {
                 "code": "device_status_unavailable",
                 "message": "device sleeping",
@@ -3237,7 +3267,7 @@ def test_public_api_status_live_does_not_fall_back_to_snapshot() -> None:
         }
 
 
-def test_public_api_status_latest_includes_pending_operation_without_snapshot() -> None:
+def test_public_api_status_latest_does_not_mix_pending_operation_without_snapshot() -> None:
     class SleepingApi:
         def request_json(self, base_url, path, method, payload=None):
             raise AssertionError("status/latest must not call the device API")
@@ -3246,17 +3276,17 @@ def test_public_api_status_latest_includes_pending_operation_without_snapshot() 
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         app.registry.add("192.168.1.10", "plant", "plant_1")
         app.api = SleepingApi()
-        operation_id = app.queue_device_status("plant_1")
+        app.queue_device_status("plant_1")
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
         body = service.project_snapshot_device_state("plant_1")
         assert body["source"] == "none"
         assert body["available"] is False
-        assert body["pending_operation_id"] == operation_id
-        assert body["pending_operation_status"] == "queued"
+        assert "pending_operation_id" not in body
+        assert "pending_operation_status" not in body
 
 
-def test_public_api_status_latest_includes_pending_operation_with_snapshot() -> None:
+def test_public_api_status_latest_does_not_mix_pending_operation_with_snapshot() -> None:
     class StatusApi:
         def __init__(self, available: bool) -> None:
             self.available = available
@@ -3285,7 +3315,7 @@ def test_public_api_status_latest_includes_pending_operation_with_snapshot() -> 
             max_wait_sec=1,
         )
         worker.run()
-        pending_operation_id = app.queue_device_status("plant_1")
+        app.queue_device_status("plant_1")
         app.api = StatusApi(False)
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
@@ -3293,8 +3323,8 @@ def test_public_api_status_latest_includes_pending_operation_with_snapshot() -> 
         assert body["source"] == "snapshot"
         assert body["available"] is True
         assert body["operation_id"] == completed_operation_id
-        assert body["pending_operation_id"] == pending_operation_id
-        assert body["pending_operation_status"] == "queued"
+        assert "pending_operation_id" not in body
+        assert "pending_operation_status" not in body
 
 
 

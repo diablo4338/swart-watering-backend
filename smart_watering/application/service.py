@@ -267,3 +267,18 @@ class SmartWateringService:
             device, "device_status", "/watering", None,
             f"read status {device.name}", method="GET",
         )
+
+    def request_device_status_snapshot(self, device_name: str) -> str:
+        """Fetch and persist a status snapshot immediately, without the command queue."""
+        device = self.registry.get(device_name)
+        result = self.api.request_json(device.base_url, "/watering", "GET")
+        operation_id = self.operations.create(device.name, "device_status", {})
+        self.operations.update_result(operation_id, result)
+        self.operations.event(
+            operation_id,
+            OP_SUCCESS,
+            "status fetched manually",
+            source="backend",
+            event_type="operation.succeeded",
+        )
+        return operation_id

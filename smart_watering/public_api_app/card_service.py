@@ -1,7 +1,7 @@
 ﻿import time
 from typing import Any
 
-from smart_watering.domain import DEVICE_TYPES, OP_CANCELLED
+from smart_watering.domain import DEVICE_TYPES, OP_CANCELLED, SmartWateringError
 
 from .errors import PublicApiError
 
@@ -41,13 +41,13 @@ class DeviceCardService:
         device = self.business.registry.get(device_name)
         operations = self._load_active_operations(device.name)
         status = self.device_state.project_current_device_state(device.name)
-        control = self._project_control_block(device, status, operations)
+        control = self._project_control_block(device, status)
         blocks = [
-            self._project_overview_block(device, status, operations, include_project_statistics=True),
+            self._project_overview_block(device, status, include_project_statistics=True),
             control if include_deferred_data else self._as_deferred_block_descriptor(control),
         ]
         if device.device_type == "plant":
-            parameters = self._project_watering_parameters_block(device, status, operations)
+            parameters = self._project_watering_parameters_block(device, status)
             blocks.extend([
                 parameters if include_deferred_data else self._as_deferred_block_descriptor(parameters),
                 self._project_watering_history_block(device) if include_deferred_data
@@ -56,43 +56,55 @@ class DeviceCardService:
         else:
             blocks.append(self._project_tank_watering_block(device, status, operations))
         blocks.append(self._project_operation_queue_block(device, operations))
-        revision = self._calculate_revision(status, operations)
         return {
             "device_id": device.name,
             "profile": f"{device.device_type}.v1",
             "schema_version": 1,
-            "revision": revision,
             "blocks": blocks,
         }
 
     def project_block(self, device_name: str, block_id: str) -> dict[str, Any]:
         device = self.business.registry.get(device_name)
-        operations = self._load_active_operations(device.name)
-        status = self.device_state.project_current_device_state(device.name)
-        builders = {
-            "overview": lambda: self._project_overview_block(
-                device, status, operations, include_project_statistics=True
-            ),
-            "control": lambda: self._project_control_block(device, status, operations),
-            "watering_parameters": lambda: self._project_watering_parameters_block(
-                device, status, operations
-            ),
-            "watering_history": lambda: self._project_watering_history_block(device),
-            "watering": lambda: self._project_tank_watering_block(device, status, operations),
-            "operation_queue": lambda: self._project_operation_queue_block(
-                device, operations
-            ),
-        }
-        if block_id not in builders:
+        if block_id == "operation_queue":
+            operations = self._load_active_operations(device.name)
+            return {
+                "device_id": device.name,
+                "block_revision": self._calculate_block_revision(
+                    {}, operations, self._operation_revision_watermark(device.name)
+                ),
+                "block": self._project_operation_queue_block(device, operations),
+            }
+        if block_id == "watering_history" and device.device_type == "plant":
+            return {
+                "device_id": device.name,
+                "block_revision": int(time.time() * 1000),
+                "block": self._project_watering_history_block(device),
+            }
+        supported_snapshot_blocks = {"overview", "control"}
+        if device.device_type == "plant":
+            supported_snapshot_blocks.add("watering_parameters")
+        else:
+            supported_snapshot_blocks.add("watering")
+        if block_id not in supported_snapshot_blocks:
             raise PublicApiError(
                 f"card block '{block_id}' does not exist for device '{device_name}'",
                 404,
                 "card_block_not_found",
             )
+        status = self.device_state.project_current_device_state(device.name)
+        operations = self._load_active_operations(device.name) if block_id == "watering" else []
+        builders = {
+            "overview": lambda: self._project_overview_block(
+                device, status, include_project_statistics=True
+            ),
+            "control": lambda: self._project_control_block(device, status),
+            "watering_parameters": lambda: self._project_watering_parameters_block(device, status),
+            "watering": lambda: self._project_tank_watering_block(device, status, operations),
+        }
         block = builders[block_id]()
         return {
             "device_id": device.name,
-            "card_revision": self._calculate_revision(status, operations),
+            "block_revision": self._calculate_block_revision(status, operations),
             "block": block,
         }
 
@@ -142,6 +154,13 @@ class DeviceCardService:
             )
         elif action == "stop-watering":
             self.business.queue_stop(device.name)
+        elif action == "refresh-status":
+            try:
+                self.business.request_device_status_snapshot(device.name)
+            except SmartWateringError:
+                accepted = False
+            else:
+                self.runtime.presence.mark_online(device.name)
         elif action == "set-watering-fertilized":
             event_id = self._require_integer(payload, "event_id", minimum=1)
             fertilized = payload.get("fertilized")
@@ -185,9 +204,15 @@ class DeviceCardService:
         }
 
     def _load_active_operations(self, device_name: str) -> list[dict[str, Any]]:
-        return self.business.operations.details_from_operations(
-            self.business.operations.list_non_terminal(device_name)
-        )
+        operations = self.business.operations.list_non_terminal(device_name)
+        return [
+            self.business.operations.detail_from_operation(operation, [])
+            for operation in operations
+            if operation.get("operation_type") != "device_status"
+        ]
+
+    def _operation_revision_watermark(self, device_name: str) -> float:
+        return self.business.operations.latest_user_visible_updated_at(device_name) or 0
 
     def _project_operation_queue_block(
         self, device: Any, operations: list[dict[str, Any]]
@@ -282,7 +307,7 @@ class DeviceCardService:
             "required": False,
             "data": {},
             "refresh": {
-                "mode": "once",
+                "mode": "on_open",
                 "href": (
                     f"/api/v3/devices/{device.name}/card/blocks/watering_history"
                 ),
@@ -301,7 +326,6 @@ class DeviceCardService:
         self,
         device: Any,
         status: dict[str, Any],
-        operations: list[dict[str, Any]],
         include_project_statistics: bool,
     ) -> dict[str, Any]:
         result = status.get("result") or {}
@@ -312,7 +336,7 @@ class DeviceCardService:
         primary_value: dict[str, Any]
         statistics: list[dict[str, Any]] = []
         if device.device_type == "plant":
-            threshold_weight = self._remaining_weight_above_threshold(weight, config, device.name)
+            threshold_weight = self._remaining_weight_above_threshold(weight, config)
             primary_value = {
                 "value": threshold_weight,
                 "unit": "g",
@@ -331,7 +355,13 @@ class DeviceCardService:
                 "label": "Water weight",
                 "tone": "danger" if water is not None and water < 100 else "accent",
             }
-        workflow = self._project_workflow_state(result, operations)
+        workflow = self._project_workflow_state(result)
+        raw_connectivity = status.get("status") or "offline"
+        connectivity_code = str(getattr(raw_connectivity, "value", raw_connectivity))
+        connectivity = {
+            "online": {"label": "Online", "severity": "success"},
+            "offline": {"label": "Offline", "severity": "error"},
+        }.get(connectivity_code, {"label": "Offline", "severity": "error"})
         return {
             "id": "overview",
             "kind": "device_overview",
@@ -341,10 +371,10 @@ class DeviceCardService:
                 "title": device.name,
                 "subtitle": f"MCU: {device.controller_name}",
                 "status": {
-                    "code": workflow["code"] if workflow["code"] != "idle" else ("online" if online else "offline"),
-                    "label": workflow["label"] if workflow["code"] != "idle" else ("Online" if online else "Offline"),
-                    "severity": workflow["severity"] if workflow["code"] != "idle" else ("success" if online else "error"),
+                    "code": connectivity_code,
+                    **connectivity,
                 },
+                "workflow": workflow,
                 "source": status.get("source") if data_available else "none",
                 "primary_value": primary_value,
                 "snapshot_at": (
@@ -354,6 +384,18 @@ class DeviceCardService:
                 ),
                 "statistics": statistics,
             },
+            "actions": [{
+                "kind": "action",
+                "id": "refresh_status",
+                "label": "Refresh device status",
+                "control_type": "button.v1",
+                "enabled": True,
+                "request": {
+                    "method": "POST",
+                    "href": f"/api/v3/devices/{device.name}/actions/refresh-status",
+                    "body": {"binding": "none"},
+                },
+            }],
             "refresh": {
                 "mode": "poll",
                 "interval_ms": 5000,
@@ -361,43 +403,13 @@ class DeviceCardService:
             },
         }
 
-    def _project_control_block(
-        self, device: Any, status: dict[str, Any], operations: list[dict[str, Any]]
-    ) -> dict[str, Any]:
+    def _project_control_block(self, device: Any, status: dict[str, Any]) -> dict[str, Any]:
         result = status.get("result") or {}
         config = result.get("config") or {}
-        snapshot_at = status.get("result_received_at") or 0
-        confirmed_config = self._find_successful_operation_after(
-            device.name, "config", snapshot_at
-        )
-        confirmed_interval = self._find_successful_operation_after(
-            device.name, "sleep_interval", snapshot_at
-        )
-        confirmed_sleep = max(
-            filter(
-                None,
-                (
-                    self._find_successful_operation_after(device.name, "sleep_enable", snapshot_at),
-                    self._find_successful_operation_after(device.name, "sleep_disable", snapshot_at),
-                ),
-            ),
-            key=lambda operation: operation["updated_at"],
-            default=None,
-        )
-        confirmed_config_payload = (confirmed_config or {}).get("payload") or {}
-        applied_device_type = confirmed_config_payload.get("device_type", device.device_type)
-        applied_tare = confirmed_config_payload.get("tare_weight_g", config.get("tare_weight_g"))
-        config_pending = self._find_active_operation(operations, "device_config")
-        applied_device_type = self._project_pending_value(
-            config_pending, "device_type", applied_device_type
-        )
-        applied_tare = self._project_pending_value(config_pending, "tare_weight_g", applied_tare)
-        applied_interval = (confirmed_interval or {}).get("payload", {}).get(
-            "minutes", config.get("sleep_interval_min")
-        )
+        applied_device_type = config.get("device_type", device.device_type)
+        applied_tare = config.get("tare_weight_g")
+        applied_interval = config.get("sleep_interval_min")
         applied_sleep_disabled = config.get("sleep_disabled")
-        if confirmed_sleep is not None:
-            applied_sleep_disabled = confirmed_sleep["type"] == "sleep_disable"
         controls: list[dict[str, Any]] = [
             self._field_with_commit_action(
                 "backend_name", "Name", "text_input.v1", "string", device.name,
@@ -421,10 +433,6 @@ class DeviceCardService:
                 f"/api/v3/devices/{device.name}/actions/set-tare-weight", "tare_weight_g",
                 unit="g", constraints={"min": 0, "step": 1},
             ))
-        sleep_pending = self._find_active_operation(operations, "sleep_enable", "sleep_disable")
-        interval_pending = self._find_active_operation(operations, "sleep_interval")
-        if sleep_pending is not None:
-            applied_sleep_disabled = sleep_pending["type"] == "sleep_disable"
         controls.extend([
             {
                 "kind": "action",
@@ -432,7 +440,7 @@ class DeviceCardService:
                 "label": "Sleep mode",
                 "control_type": "action_toggle.v1",
                 "value_type": "boolean",
-                "enabled": sleep_pending is None and config.get("sleep_disabled") is not None,
+                "enabled": config.get("sleep_disabled") is not None,
                 "request": self._advertised_action_request(
                     f"/api/v3/devices/{device.name}/actions/set-sleep",
                     "control_value", property="enabled",
@@ -440,10 +448,9 @@ class DeviceCardService:
             },
             self._field_with_commit_action(
                 "sleep_interval_minutes", "Sleep interval", "number_input.v1", "integer",
-                self._project_pending_value(interval_pending, "minutes", applied_interval),
+                applied_interval,
                 f"/api/v3/devices/{device.name}/actions/set-sleep-interval", "minutes",
                 unit="min", constraints={"min": 1, "max": 50, "step": 1},
-                enabled=interval_pending is None,
             ),
             {
                 "kind": "action",
@@ -451,7 +458,7 @@ class DeviceCardService:
                 "label": "Set zero",
                 "control_type": "hold_action.v1",
                 "preset": "zero_capture_hold.v1",
-                "enabled": self._find_active_operation(operations, "zero_capture") is None,
+                "enabled": True,
                 "request": self._advertised_action_request(
                     f"/api/v3/devices/{device.name}/actions/capture-zero"
                 ),
@@ -472,7 +479,7 @@ class DeviceCardService:
                 "label": "Calibrate",
                 "control_type": "hold_action.v1",
                 "preset": "calibration_hold.v1",
-                "enabled": self._find_active_operation(operations, "scale_calibration") is None,
+                "enabled": True,
                 "request": self._advertised_action_request(
                     f"/api/v3/devices/{device.name}/actions/calibrate",
                     "fields", fields=["calibration_weight_g"],
@@ -484,7 +491,7 @@ class DeviceCardService:
             "backend_name": device.name,
             "device_type": applied_device_type,
             "sleep_enabled": None if applied_sleep_disabled is None else not applied_sleep_disabled,
-            "sleep_interval_minutes": self._project_pending_value(interval_pending, "minutes", applied_interval),
+            "sleep_interval_minutes": applied_interval,
             "tare_weight_g": applied_tare,
             "calibration_weight_g": None,
         }
@@ -497,36 +504,26 @@ class DeviceCardService:
             "schema": {"controls": controls},
             "data": {"values": values},
             "refresh": {
-                "mode": "poll" if operations else "on_open",
-                "interval_ms": 3000 if operations else None,
+                "mode": "on_open",
+                "interval_ms": None,
                 "href": f"/api/v3/devices/{device.name}/card/blocks/control",
             },
         }
 
     def _project_watering_parameters_block(
-        self, device: Any, status: dict[str, Any], operations: list[dict[str, Any]]
+        self, device: Any, status: dict[str, Any]
     ) -> dict[str, Any]:
-        settings = self.business.registry.watering_settings(device.name)
         result = status.get("result") or {}
         config = result.get("config") or {}
         weight = result.get("weight") or {}
         values = {
             "gross_weight_g": weight.get("gross_weight_g"),
-            "dry_weight_g": self._prefer_stored_setting(
-                settings, config, "dry_weight_g"
-            ),
-            "wet_weight_g": self._prefer_stored_setting(
-                settings, config, "wet_weight_g"
-            ),
-            "watering_loss_threshold_percent": self._prefer_stored_setting(
-                settings, config, "watering_loss_threshold_percent"
+            "dry_weight_g": config.get("dry_weight_g"),
+            "wet_weight_g": config.get("wet_weight_g"),
+            "watering_loss_threshold_percent": config.get(
+                "watering_loss_threshold_percent"
             ),
         }
-        pending = self._find_active_operation(operations, "device_config")
-        for key in (
-            "dry_weight_g", "wet_weight_g", "watering_loss_threshold_percent"
-        ):
-            values[key] = self._project_pending_value(pending, key, values[key])
         controls = [
             {"kind": "field", "id": "gross_weight_g", "label": "Raw weight (gross)", "control_type": "readonly.v1", "value_type": "decimal", "unit": "g"},
             {"kind": "field", "id": "dry_weight_g", "label": "Dry weight", "control_type": "number_input.v1", "value_type": "integer", "unit": "g", "constraints": {"min": 0}},
@@ -534,7 +531,7 @@ class DeviceCardService:
             {"kind": "field", "id": "watering_loss_threshold_percent", "label": "Water loss threshold", "control_type": "number_input.v1", "value_type": "integer", "unit": "%", "constraints": {"min": 0, "max": 100}},
             {
                 "kind": "action", "id": "save_watering_parameters", "label": "Save",
-                "control_type": "button.v1", "enabled": pending is None,
+                "control_type": "button.v1", "enabled": True,
                 "request": self._advertised_action_request(
                     f"/api/v3/devices/{device.name}/actions/set-watering-parameters",
                     "fields",
@@ -548,8 +545,8 @@ class DeviceCardService:
             "required": True, "schema": {"controls": controls},
             "data": {"values": values},
             "refresh": {
-                "mode": "poll" if pending else "on_open",
-                "interval_ms": 3000 if pending else None,
+                "mode": "on_open",
+                "interval_ms": None,
                 "href": f"/api/v3/devices/{device.name}/card/blocks/watering_parameters",
             },
         }
@@ -653,15 +650,12 @@ class DeviceCardService:
         }
 
     def _remaining_weight_above_threshold(
-        self, weight: dict[str, Any], config: dict[str, Any], device_name: str
+        self, weight: dict[str, Any], config: dict[str, Any]
     ) -> int | None:
-        settings = self.business.registry.watering_settings(device_name)
         gross = weight.get("gross_weight_g")
-        dry = self._prefer_stored_setting(settings, config, "dry_weight_g")
-        wet = self._prefer_stored_setting(settings, config, "wet_weight_g")
-        loss = self._prefer_stored_setting(
-            settings, config, "watering_loss_threshold_percent"
-        )
+        dry = config.get("dry_weight_g")
+        wet = config.get("wet_weight_g")
+        loss = config.get("watering_loss_threshold_percent")
         if not all(isinstance(value, (int, float)) for value in (gross, dry, wet, loss)):
             return None
         gross_value, dry_value, wet_value, loss_value = map(
@@ -673,13 +667,6 @@ class DeviceCardService:
             gross_value - dry_value
             - (wet_value - dry_value) * loss_value / 100
         )
-
-    @staticmethod
-    def _prefer_stored_setting(
-        settings: dict[str, Any], config: dict[str, Any], key: str
-    ) -> Any:
-        value = settings.get(key)
-        return value if isinstance(value, (int, float)) else config.get(key)
 
     def _project_statistics(self, device_name: str) -> list[dict[str, Any]]:
         now = time.monotonic()
@@ -696,49 +683,24 @@ class DeviceCardService:
         self._project_statistics_cache[device_name] = (now + 300, value)
         return value
 
-    def _find_successful_operation_after(
-        self, device_name: str, operation_type: str, timestamp: float
-    ) -> dict[str, Any] | None:
-        operation = self.business.operations.latest_for_device(
-            device_name, operation_type
-        )
-        if (
-            operation is None
-            or operation.get("status") != "success"
-            or operation.get("updated_at", 0) <= timestamp
-        ):
-            return None
-        return operation
-
     @staticmethod
-    def _project_workflow_state(
-        result: dict[str, Any], operations: list[dict[str, Any]]
-    ) -> dict[str, str]:
+    def _project_workflow_state(result: dict[str, Any]) -> dict[str, str]:
         watering = result.get("watering") or {}
-        active = next(
-            (op for op in operations if op.get("type") in {"fill", "watering_start"}),
-            None,
-        )
-        if active:
-            status = active.get("status")
-            if status in {"queued", "sending"}:
-                return {"code": "watering_queued", "label": "Watering queued", "severity": "info"}
-            return {"code": "watering", "label": "Watering", "severity": "info"}
         if watering.get("active"):
             return {"code": "watering", "label": "Watering", "severity": "info"}
-        if operations:
-            return {"code": "updating", "label": "Applying changes", "severity": "info"}
         return {"code": "idle", "label": "Idle", "severity": "success"}
 
     @staticmethod
-    def _project_pending_value(operation: dict[str, Any] | None, key: str, fallback: Any) -> Any:
-        if operation and isinstance(operation.get("payload"), dict):
-            return operation["payload"].get(key, fallback)
-        return fallback
-
-    @staticmethod
-    def _calculate_revision(status: dict[str, Any], operations: list[dict[str, Any]]) -> int:
-        timestamps = [status.get("result_received_at") or 0]
+    def _calculate_block_revision(
+        status: dict[str, Any],
+        operations: list[dict[str, Any]],
+        operation_watermark: float = 0,
+    ) -> int:
+        timestamps = [
+            status.get("result_received_at") or 0,
+            status.get("presence_checked_at") or 0,
+            operation_watermark,
+        ]
         timestamps.extend(
             value for operation in operations
             if isinstance((value := operation.get("updated_at")), (int, float))

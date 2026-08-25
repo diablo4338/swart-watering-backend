@@ -77,7 +77,6 @@ class DeviceStateProjectionService:
 
     def project_snapshot_device_state(self, device_name: str) -> dict[str, Any]:
         device = self.business.registry.get(device_name)
-        pending = self.find_pending_snapshot_operation(device.name)
         latest = self.business.operations.latest_successful_result(device.name, "device_status")
         if latest is not None and latest["result"] is not None:
             return self.project_available_device_state(
@@ -86,11 +85,9 @@ class DeviceStateProjectionService:
                 result=self.project_device_snapshot(latest["result"]),
                 result_received_at=latest["result_received_at"],
                 operation_id=latest["operation_id"],
-                pending=pending,
             )
         return self.project_unavailable_device_state(
             device_name=device.name,
-            pending=pending,
             exc=SmartWateringError(
                 f"no stored status snapshot exists for device '{device.name}'"
             ),
@@ -98,32 +95,25 @@ class DeviceStateProjectionService:
         )
 
     def project_current_device_state(self, device_name: str) -> dict[str, Any]:
-        """Resolve live MCU data or atomically fall back to the stored snapshot."""
-        if not self.presence.get(device_name).online:
-            return {**self.project_snapshot_device_state(device_name), "online": False}
-
-        live = self.project_live_device_state(device_name)
-        if live.get("available") and live.get("source") == DeviceStatusSource.LIVE:
-            return {**live, "online": True}
-
-        error = live.get("error") or {}
-        self.presence.mark_offline(
-            device_name, str(error.get("message") or "live status request failed")
-        )
-        return {**self.project_snapshot_device_state(device_name), "online": False}
+        """Project the latest stored MCU state with independently monitored presence."""
+        presence = self.presence.get(device_name)
+        return {
+            **self.project_snapshot_device_state(device_name),
+            "status": DeviceStatus(presence.state),
+            "online": presence.online,
+            "presence_checked_at": presence.checked_at,
+        }
 
     def project_live_device_state(self, device_name: str) -> dict[str, Any]:
         device = self.business.registry.get(device_name)
-        pending = self.find_pending_snapshot_operation(device.name)
         try:
-            return self._request_live_device_state(device, pending)
+            return self._request_live_device_state(device)
         except SmartWateringError as exc:
-            return self.project_unavailable_device_state(device.name, pending, exc)
+            return self.project_unavailable_device_state(device.name, exc)
 
     def _request_live_device_state(
         self,
         device: Any,
-        pending: dict[str, Any] | None,
     ) -> dict[str, Any]:
         previous_timeout = getattr(self.business.api, "timeout_sec", None)
         try:
@@ -141,53 +131,35 @@ class DeviceStateProjectionService:
                 result=self.project_device_snapshot(result),
                 result_received_at=time.time(),
                 operation_id=None,
-                pending=pending,
             )
         finally:
             if previous_timeout is not None:
                 self.business.api.timeout_sec = previous_timeout
 
     @staticmethod
-    def project_pending_snapshot_fields(
-        pending: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        return {
-            "pending_operation_id": pending["operation_id"] if pending else None,
-            "pending_operation_status": pending["status"] if pending else None,
-        }
-
-    def find_pending_snapshot_operation(self, device_name: str) -> dict[str, Any] | None:
-        return self.business.operations.latest_non_terminal(device_name, "device_status")
-
-    @classmethod
     def project_available_device_state(
-        cls,
         device_name: str,
         source: DeviceStatusSource,
         result: dict[str, Any],
         result_received_at: float,
         operation_id: str | None,
-        pending: dict[str, Any] | None,
     ) -> dict[str, Any]:
         return {
             "device": device_name,
             "status": (
                 DeviceStatus.ONLINE
                 if source is DeviceStatusSource.LIVE
-                else DeviceStatus.UNKNOWN
+                else DeviceStatus.OFFLINE
             ),
             "source": source, "available": True,
             "result": result, "result_received_at": result_received_at,
             "operation_id": operation_id,
-            **cls.project_pending_snapshot_fields(pending),
             "error": None,
         }
 
-    @classmethod
+    @staticmethod
     def project_unavailable_device_state(
-        cls,
         device_name: str,
-        pending: dict[str, Any] | None,
         exc: SmartWateringError,
         error_code: str = "device_status_unavailable",
     ) -> dict[str, Any]:
@@ -199,7 +171,6 @@ class DeviceStateProjectionService:
             "result": None,
             "result_received_at": None,
             "operation_id": None,
-            **cls.project_pending_snapshot_fields(pending),
             "error": {
                 "code": error_code,
                 "message": str(exc),

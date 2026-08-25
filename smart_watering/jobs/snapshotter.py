@@ -52,6 +52,14 @@ class StatusSnapshotScheduler:
         self._was_idle = False
         queued = 0
         for device in devices:
+            existing = self.app.queue.find_duplicate(
+                device.base_url, "/watering", "GET", None
+            )
+            if existing is not None:
+                self.log(
+                    f"snapshot already pending device={device.name} operation_id={existing}"
+                )
+                continue
             operation_id = self.app.queue_device_status(device.name)
             queued += 1
             self.log(f"queued device_status device={device.name} operation_id={operation_id}")

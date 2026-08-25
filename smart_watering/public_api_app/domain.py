@@ -5,7 +5,6 @@ from typing import Any
 class DeviceStatus(str, Enum):
     ONLINE = "online"
     OFFLINE = "offline"
-    UNKNOWN = "unknown"
 
 
 class DeviceStatusSource(str, Enum):

@@ -24,21 +24,31 @@ measured bottleneck.
 
 A process-local `DevicePresenceMonitor` starts in the FastAPI lifespan, immediately
 checks every registered device, and repeats the cycle every five seconds. Health
-checks use a dedicated client with a 200 ms timeout and bounded concurrency. Their
-`unknown`, `online`, or `offline` results are stored in the thread-safe runtime
+checks use a dedicated client with a one-second timeout and bounded concurrency. Their
+Binary `online` or `offline` results are stored in the thread-safe runtime
 `DevicePresenceRegistry`.
 
-Card and block requests never perform a health probe. If runtime presence is online,
-the resolver requests current MCU state for the projection. A failed live-state
-request immediately marks the device offline and falls back to the latest stored
-snapshot; an already-offline device uses the snapshot without contacting the MCU.
-The next monitor cycle is responsible for bringing it online again. Overview data
-exposes `source` as `live`, `snapshot`, or `none`. The Android client never owns or
-infers connectivity state.
+Card and block requests never contact the MCU. The periodic snapshot worker is the
+single regular source of full MCU state and stores successful `/watering` responses.
+When the MCU confirms a deterministic configuration command through its callback,
+the backend applies only that command's confirmed fields to the latest stored
+snapshot. This keeps snapshot-backed blocks current without reading operation state
+during projection or waiting for another full snapshot.
+The presence monitor independently projects `online` or `offline` from its health
+probes. A device is `offline` until its first successful probe. Cards read the latest stored snapshot regardless of connectivity;
+an advertised manual refresh action performs an immediate direct MCU read and stores
+the result without using the command queue. A failed manual read returns
+`accepted: false`, and Android keeps its current card unchanged. Overview data
+exposes `source` as `snapshot` or `none`. The Android client never owns or infers
+connectivity state.
 
-The overview projection includes `snapshot_at` only when the MCU is offline and the
-displayed values come from a stored snapshot. Android additionally renders that
-timestamp only for the explicit `offline` status.
+Connectivity and workflow are separate overview fields. Connectivity never changes
+to `watering`; overview workflow is derived only from the snapshot and is therefore
+either `idle` or `watering`. Queued and applying commands are represented only by
+the operation queue. System `device_status` operations are excluded from the
+user-facing operation queue. The overview projection
+includes `snapshot_at` when the MCU is offline and displayed values come from a
+stored snapshot.
 
 ## Goal
 
@@ -52,6 +62,36 @@ The design is deliberately split between:
 The client is not a generic browser for arbitrary server-defined UI. It supports a versioned vocabulary of block and field types and fails safely when it receives an unsupported required component.
 
 ## Responsibility boundary
+
+### Block data dependency contract
+
+Each block is a projection of explicitly allowed sources. A block must not read an
+operation merely to show a newer desired value, disable a control, or synthesize a
+workflow state. Until a command is reflected by a full MCU snapshot or an
+MCU-confirmed patch to that snapshot, it is visible only in `operation_queue`.
+
+| Block | Allowed data sources | Explicitly forbidden |
+| --- | --- | --- |
+| `overview` | latest stored MCU snapshot; binary runtime presence for connectivity; cached statistics for the statistics section; registry identity for title/subtitle | operation records and direct MCU reads |
+| `control` | latest stored MCU snapshot, including MCU-confirmed callback patches; registry identity for the backend name and device fallback metadata | operation records, queue state, and direct MCU reads |
+| `watering_parameters` | latest stored MCU snapshot | registry watering-setting overrides, operation records, queue state, and direct MCU reads |
+| `operation_queue` | active user-visible operation records | MCU snapshots, presence, statistics, history, and direct MCU reads |
+| `watering_history` | stored watering history/events | MCU snapshots, presence, operation queue, and direct MCU reads |
+| tank `watering` | latest stored MCU snapshot and the relevant active watering operation | unrelated operation types and direct MCU reads |
+
+The tank `watering` block is the intentional exception to single-source projection:
+its purpose is to render both observed device state and the progress/cancellation of
+the current watering command. The full-card endpoint may load the union of sources
+needed by its blocks, but every block builder receives only the sources allowed by
+this table. A per-block endpoint loads only that block's allowed sources.
+
+Every independently fetched block response has its own `block_revision`. There is
+no card-wide revision and revisions from different blocks are never compared.
+Block revision watermarks may include source metadata that is not rendered. In
+particular, overview revision includes the latest presence probe timestamp, and the
+operation-queue revision includes the latest user-visible operation update even when
+that update made the operation terminal and removed it from the rendered list. This
+prevents the client from rejecting a disappearance or connectivity change as stale.
 
 ### Backend naming
 
@@ -90,6 +130,14 @@ cards and blocks. Runtime wiring exposes them as `device_state` and `cards`.
 
 The client must not contain `isFinalOperationStatus`, operation-type filters, operation recovery loops, or per-command workflow logic.
 
+`action_toggle.v1` owns generic optimistic interaction behavior. After a tap it
+shows the requested value immediately, disables itself for at least the containing
+block's polling interval, and waits for the action HTTP result. Poll replacements
+must not overwrite its displayed value while this guard is active. It unlocks only
+after both the guard interval and a successful response; a failed response restores
+the previous value and shows the request error. This behavior is tied to the stable
+control type, not to a block id or operation type.
+
 ## API shape
 
 ### 1. Device discovery
@@ -127,7 +175,6 @@ The response describes ordered blocks and returns enough initial data to render 
   "device_id": "avocado",
   "profile": "plant.v1",
   "schema_version": 1,
-  "revision": 184,
   "blocks": [
     {
       "id": "overview",
@@ -137,11 +184,25 @@ The response describes ordered blocks and returns enough initial data to render 
       "data": {
         "title": "Avocado",
         "status": {"code": "online", "label": "Online", "severity": "success"},
+        "workflow": {"code": "idle", "label": "Idle", "severity": "success"},
         "primary_value": {"value": 1240, "unit": "g", "label": "Weight"},
         "snapshot_at": "2026-08-24T12:00:00Z",
         "statistics": []
       },
-      "actions": [],
+      "actions": [
+        {
+          "kind": "action",
+          "id": "refresh_status",
+          "label": "Refresh device status",
+          "control_type": "button.v1",
+          "enabled": true,
+          "request": {
+            "method": "POST",
+            "href": "/api/v3/devices/avocado/actions/refresh-status",
+            "body": {"binding": "none"}
+          }
+        }
+      ],
       "refresh": {
         "mode": "poll",
         "interval_ms": 5000,
@@ -193,6 +254,9 @@ of closed blocks. Data for `on_open` and `once` blocks is deliberately empty and
 loaded from `refresh.href` only when the user opens the block. A `once` block is
 loaded once per client session; an `on_open` block is reloaded on every opening.
 Polling is active only for always-visible blocks and for the currently open block.
+Each block endpoint loads only the backend projections required by that block. In
+particular, `operation_queue` must not load the device snapshot, and lightweight
+operation projections must not load event histories that are not rendered.
 
 ## Block model
 
@@ -401,7 +465,7 @@ Semantics:
 
 - `none`: embedded data is immutable for this card lifetime;
 - `once`: load once when the block first becomes visible;
-- `on_open`: refresh whenever the card becomes active;
+- `on_open`: refresh whenever that expandable block is opened;
 - `manual`: only an explicit user action refreshes it;
 - `poll`: poll only while visible, honouring the server interval and ETag;
 - `stream`: subscribe while visible and apply block/card updates by revision.
@@ -409,19 +473,20 @@ Semantics:
 Recommended initial policies:
 
 - overview: `poll`;
+- operation queue: `poll`;
 - control: `on_open`, with action responses replacing its state;
 - watering parameters: `on_open`, with save response replacing its state;
-- watering history: `once`, paginated on demand, and invalidated by a completed watering event.
+- watering history: `on_open`, paginated on demand;
 
 The server may return a changed refresh policy with any block response. The client must enforce reasonable global minimum and maximum polling intervals to protect itself from a bad manifest.
 
 ## State projection
 
 Commands submitted through block actions enter the backend queue. Workers and MCU
-callbacks update operation records; `DeviceCardService` projects those internal
-records and the current MCU/snapshot data into user-facing states such as `idle`,
-`watering_queued`, `watering`, and `updating`. Android does not translate backend
-operation types or lifecycle statuses.
+callbacks update operation records. `DeviceCardService` exposes those records only
+through `operation_queue`; snapshot-backed blocks do not project desired or pending
+operation state. Android does not translate backend operation types or lifecycle
+statuses.
 
 Every action currently returns the complete updated card:
 
@@ -432,7 +497,6 @@ Every action currently returns the complete updated card:
     "device_id": "fikus",
     "profile": "plant.v1",
     "schema_version": 1,
-    "revision": 185,
     "blocks": []
   }
 }
@@ -445,7 +509,8 @@ The client transports them unchanged and never interprets or tracks their lifecy
 
 - `profile` versions native composition, for example `plant.v1`.
 - `schema_version` versions the block vocabulary and manifest contract.
-- `revision` orders card updates and prevents stale responses from replacing newer state.
+- `block_revision` orders updates of one block. Android keys it by `device_id:block.id`
+  and never compares revisions belonging to different blocks.
 - Block GET endpoints should support `ETag` and `If-None-Match`.
 - Form schemas may be referenced by a cacheable `schema_href` when many devices share the same schema. Start with embedded schemas; introduce references only when payload size justifies the complexity.
 
@@ -454,8 +519,9 @@ The client transports them unchanged and never interprets or tracks their lifecy
 - Unsupported optional block: omit it and log telemetry.
 - Unsupported required block or newer incompatible schema: show an explicit client-update-required state.
 - Failed block request: show an error inside that block; do not destroy the whole card.
-- Failed action: return a structured error and, when possible, the latest block/card revision.
-- Out-of-order response: discard it when its revision is older than the rendered revision.
+- Failed action: return a structured error and, when possible, the latest block state.
+- Out-of-order block response: discard it only when its `block_revision` is older
+  than the rendered revision for the same `device_id:block.id`.
 
 ## Current implementation boundary
 

@@ -10,7 +10,7 @@ from smart_watering.domain import DeviceApiClient
 
 @dataclass(frozen=True)
 class DevicePresence:
-    state: str = "unknown"
+    state: str = "offline"
     checked_at: float | None = None
     last_online_at: float | None = None
     last_error: str | None = None
@@ -59,7 +59,7 @@ class DevicePresenceMonitor:
         device_registry: Any,
         presence: DevicePresenceRegistry,
         interval_sec: float = 5.0,
-        timeout_sec: float = 0.2,
+        timeout_sec: float = 1.0,
         concurrency: int = 8,
     ) -> None:
         self.device_registry = device_registry

@@ -13,6 +13,7 @@ from smart_watering.infrastructure.database import (
     PlantWateringEventRecord, UserRecord, UserSessionRecord, record_to_mapping,
 )
 from .foundation import (
+    CONFIG_FLOAT_KEYS,
     DEVICE_TYPES,
     OP_ACCEPTED,
     OP_CANCELLED,
@@ -726,6 +727,19 @@ class OperationLog:
     def log(message: str) -> None:
         print(f"operations: {message}", flush=True)
 
+    def _detail_without_events(self, row: OperationRecord | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        operation = record_to_mapping(
+            row,
+            (
+                "operation_id", "correlation_id", "causation_id", "device_name",
+                "operation_type", "payload_json", "result_json", "status",
+                "created_at", "updated_at",
+            ),
+        )
+        return self.detail_from_operation(operation, [])
+
     def create(
         self, device_name: str, operation_type: str, payload: dict[str, Any],
         correlation_id: str | None = None, causation_id: str | None = None,
@@ -878,6 +892,24 @@ class OperationLog:
             f"event operation_id={operation_id} device={device_name} "
             f"type={self.public_type(operation_type)} status={status} detail={detail!r}"
         )
+        if status == OP_SUCCESS and source == "callback":
+            try:
+                payload = json.loads(payload_json or "{}")
+                patch = self.confirmed_snapshot_patch(
+                    operation_type, payload if isinstance(payload, dict) else {}
+                )
+                if patch is not None and not self.patch_latest_device_snapshot(
+                    device_name, patch, operation_id
+                ):
+                    self.log(
+                        f"snapshot patch skipped operation_id={operation_id} "
+                        f"device={device_name} reason=no_valid_snapshot"
+                    )
+            except json.JSONDecodeError as exc:
+                self.log(
+                    f"snapshot patch skipped operation_id={operation_id} "
+                    f"device={device_name} reason={exc}"
+                )
         if operation_type == "config" and status == OP_SUCCESS:
             try:
                 payload = json.loads(payload_json or "{}")
@@ -1003,6 +1035,84 @@ class OperationLog:
                 .where(OperationRecord.operation_id == operation_id)
                 .values(result_json=result_json, updated_at=now)
             )
+
+    def patch_latest_device_snapshot(
+        self, device_name: str, patch: dict[str, Any], source_operation_id: str
+    ) -> bool:
+        """Apply an MCU-confirmed delta to the latest stored /watering snapshot."""
+        now = time.time()
+        with self.store.session() as session:
+            row = session.scalars(
+                select(OperationRecord)
+                .where(
+                    OperationRecord.device_name == device_name,
+                    OperationRecord.operation_type == "device_status",
+                    OperationRecord.status == OP_SUCCESS,
+                    OperationRecord.result_json.is_not(None),
+                )
+                .order_by(OperationRecord.updated_at.desc())
+                .limit(1)
+            ).first()
+            if row is None:
+                return False
+            try:
+                snapshot = json.loads(row.result_json or "{}")
+            except json.JSONDecodeError:
+                return False
+            if not isinstance(snapshot, dict):
+                return False
+
+            def merge(target: dict[str, Any], delta: dict[str, Any]) -> None:
+                for key, value in delta.items():
+                    current = target.get(key)
+                    if isinstance(current, dict) and isinstance(value, dict):
+                        merge(current, value)
+                    else:
+                        target[key] = value
+
+            merge(snapshot, patch)
+            row.result_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+            row.updated_at = now
+            session.add(OperationEventRecord(
+                operation_id=row.operation_id,
+                status=OP_SUCCESS,
+                detail="snapshot patched from confirmed controller callback",
+                source="callback",
+                event_type="snapshot.patched",
+                data_json=json.dumps(
+                    {"source_operation_id": source_operation_id, "patch": patch},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                created_at=now,
+            ))
+        return True
+
+    @staticmethod
+    def confirmed_snapshot_patch(
+        operation_type: str, payload: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        if operation_type == "sleep_enable":
+            return {"config": {"sleep_disabled": False}}
+        if operation_type == "sleep_disable":
+            return {"config": {"sleep_disabled": True}}
+        if operation_type == "sleep_interval":
+            minutes = payload.get("minutes")
+            return {"config": {"sleep_interval_min": minutes}} if isinstance(minutes, int) else None
+        if operation_type in {"config", "controller_name"}:
+            patch: dict[str, Any] = {}
+            config = {key: payload[key] for key in CONFIG_FLOAT_KEYS if key in payload}
+            if config:
+                patch["config"] = config
+            device: dict[str, Any] = {}
+            if "device_type" in payload:
+                device["type"] = payload["device_type"]
+            if "name" in payload:
+                device["name"] = payload["name"]
+            if device:
+                patch["device"] = device
+            return patch or None
+        return None
 
     def get(self, operation_id: str) -> dict[str, Any] | None:
         fields = (
@@ -1265,6 +1375,16 @@ class OperationLog:
             ).all()
         return [record_to_mapping(row, fields) for row in rows]
 
+    def latest_user_visible_updated_at(self, device_name: str) -> float | None:
+        """Return a revision watermark including operations that just became terminal."""
+        with self.store.session() as session:
+            return session.scalar(
+                select(func.max(OperationRecord.updated_at)).where(
+                    OperationRecord.device_name == device_name,
+                    OperationRecord.operation_type != "device_status",
+                )
+            )
+
     def devices_with_non_terminal(self, operation_types: set[str]) -> set[str]:
         with self.store.session() as session:
             device_names = session.scalars(
@@ -1304,8 +1424,8 @@ class OperationLog:
 
     def latest_successful_result(self, device_name: str, operation_type: str) -> dict[str, Any] | None:
         with self.store.session() as session:
-            operation_id = session.scalar(
-                select(OperationRecord.operation_id)
+            row = session.scalars(
+                select(OperationRecord)
                 .where(
                     OperationRecord.device_name == device_name,
                     OperationRecord.operation_type == operation_type,
@@ -1314,13 +1434,13 @@ class OperationLog:
                 )
                 .order_by(OperationRecord.updated_at.desc())
                 .limit(1)
-            )
-        return self.detail(operation_id) if operation_id is not None else None
+            ).first()
+            return self._detail_without_events(row)
 
     def latest_non_terminal(self, device_name: str, operation_type: str) -> dict[str, Any] | None:
         with self.store.session() as session:
-            operation_id = session.scalar(
-                select(OperationRecord.operation_id)
+            row = session.scalars(
+                select(OperationRecord)
                 .where(
                     OperationRecord.device_name == device_name,
                     OperationRecord.operation_type == operation_type,
@@ -1328,21 +1448,21 @@ class OperationLog:
                 )
                 .order_by(OperationRecord.updated_at.desc())
                 .limit(1)
-            )
-        return self.detail(operation_id) if operation_id is not None else None
+            ).first()
+            return self._detail_without_events(row)
 
     def latest_for_device(self, device_name: str, operation_type: str) -> dict[str, Any] | None:
         with self.store.session() as session:
-            operation_id = session.scalar(
-                select(OperationRecord.operation_id)
+            row = session.scalars(
+                select(OperationRecord)
                 .where(
                     OperationRecord.device_name == device_name,
                     OperationRecord.operation_type == operation_type,
                 )
                 .order_by(OperationRecord.updated_at.desc())
                 .limit(1)
-            )
-        return self.detail(operation_id) if operation_id is not None else None
+            ).first()
+            return self._detail_without_events(row)
 
     def latest_non_terminal_watering_start(self, device_name: str) -> dict[str, Any] | None:
         with self.store.session() as session:
