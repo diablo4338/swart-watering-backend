@@ -48,7 +48,8 @@ from .foundation import (
     resolve_worker_retry_interval_sec,
 )
 from .repositories import (
-    AuthStore, CommandQueue, DeviceRegistry, OperationLog, PlantWateringEventStore,
+    AuthStore, CommandQueue, DeviceRegistry, DeviceSnapshotStore, OperationLog,
+    PlantWateringEventStore,
 )
 from .workers import (
     BackgroundWorker,
@@ -77,6 +78,7 @@ __all__ = [
     "DeviceHttpError",
     "DeviceNameConflictError",
     "DeviceRegistry",
+    "DeviceSnapshotStore",
     "DeviceType",
     "DeviceWorkerSupervisor",
     "NODE_URL_ENV",

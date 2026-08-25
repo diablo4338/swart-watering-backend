@@ -139,9 +139,6 @@ class SmartWateringCliApp(SmartWateringService):
             self._resolve_cli_device_id(device_selector), weight_g
         )
 
-    def queue_device_status(self, device_selector: str) -> str:
-        return super().queue_device_status(self._resolve_cli_device_id(device_selector))
-
     @staticmethod
     def format_status(payload: dict[str, Any]) -> str:
         device = payload.get("device", {})

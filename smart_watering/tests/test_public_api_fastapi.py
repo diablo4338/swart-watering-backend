@@ -361,12 +361,11 @@ def test_v3_device_card_exposes_server_driven_blocks_and_actions() -> None:
         }
         assert refreshed_blocks["overview"]["data"]["workflow"]["code"] == "idle"
         assert refreshed_blocks["operation_queue"]["data"] == {"items": []}
-        stored_snapshot = cli.operations.latest_successful_result(
-            device_id, "device_status"
-        )
+        stored_snapshot = cli.snapshots.latest(device_id)
         assert stored_snapshot is not None
         assert stored_snapshot["result"] == manual_snapshot
         assert cli.queue.list() == []
+        assert cli.operations.list_recent(device_id=device_id) == []
 
         with patch.object(
             cli.api,
@@ -380,9 +379,7 @@ def test_v3_device_card_exposes_server_driven_blocks_and_actions() -> None:
             )
         assert failed_refresh.status_code == 200
         assert failed_refresh.json()["accepted"] is False
-        assert cli.operations.latest_successful_result(
-            device_id, "device_status"
-        )["operation_id"] == stored_snapshot["operation_id"]
+        assert cli.snapshots.latest(device_id)["received_at"] == stored_snapshot["received_at"]
         assert cli.queue.list() == []
 
         action = client.post(

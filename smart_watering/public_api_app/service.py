@@ -136,14 +136,14 @@ class DeviceStateProjectionService:
 
     def project_snapshot_device_state(self, device_id: str) -> dict[str, Any]:
         device = self.business.registry.get_by_id(device_id)
-        latest = self.business.operations.latest_successful_result(device.id, "device_status")
-        if latest is not None and latest["result"] is not None:
-            snapshot_updated_at = latest.get("updated_at") or latest["result_received_at"]
+        latest = self.business.snapshots.latest(device.id)
+        if latest is not None:
+            snapshot_updated_at = latest["received_at"]
             patches = self.business.operations.confirmed_snapshot_patches_since(
                 device.id, snapshot_updated_at
             )
             revision = (
-                latest["operation_id"],
+                snapshot_updated_at,
                 patches[-1]["operation_id"] if patches else snapshot_updated_at,
             )
             result = self.runtime_state.read(
@@ -158,8 +158,8 @@ class DeviceStateProjectionService:
                 device_name=device.name,
                 source=DeviceStatusSource.SNAPSHOT,
                 result=result,
-                result_received_at=latest["result_received_at"],
-                operation_id=latest["operation_id"],
+                result_received_at=snapshot_updated_at,
+                operation_id=None,
             )
         return self.project_unavailable_device_state(
             device_id=device.id,

@@ -69,9 +69,7 @@ class DeviceCardService:
             operations = self._load_active_operations(device.id)
             return {
                 "device_id": device.id,
-                "block_revision": self._calculate_block_revision(
-                    {}, operations, self._operation_revision_watermark(device.id)
-                ),
+                "block_revision": time.time_ns() // 1_000_000,
                 "block": self._project_operation_queue_block(device, operations),
             }
         if block_id == "watering_history" and device.device_type == "plant":
@@ -208,11 +206,7 @@ class DeviceCardService:
         return [
             self.business.operations.detail_from_operation(operation, [])
             for operation in operations
-            if operation.get("operation_type") != "device_status"
         ]
-
-    def _operation_revision_watermark(self, device_id: str) -> float:
-        return self.business.operations.latest_user_visible_updated_at(device_id) or 0
 
     def _project_operation_queue_block(
         self, device: Any, operations: list[dict[str, Any]]

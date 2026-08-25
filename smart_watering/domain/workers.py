@@ -305,17 +305,6 @@ class BackgroundWorker:
                     active_command_id = None
                     active_started_at = 0.0
                     continue
-                if command.method == "GET" and command.path == "/watering":
-                    self.operations.update_result(command.operation_id, response)
-                    self.operations.event(
-                        command.operation_id, OP_SUCCESS, "status fetched",
-                        source="worker", event_type="operation.succeeded",
-                    )
-                    self.queue.pop(command.id)
-                    self.log(f"fetched id={command.id} operation_id={command.operation_id}", command.device_name)
-                    active_command_id = None
-                    active_started_at = 0.0
-                    continue
                 self.operations.event(
                     command.operation_id, OP_ACCEPTED, "device accepted command",
                     source="controller", event_type="command.accepted",

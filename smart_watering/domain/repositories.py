@@ -9,7 +9,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from smart_watering.infrastructure.database import (
-    CommandQueueRecord, DeviceRecord, DeviceWateringSettingsRecord, OperationEventRecord, OperationRecord,
+    CommandQueueRecord, DeviceRecord, DeviceSnapshotRecord, DeviceWateringSettingsRecord,
+    OperationEventRecord, OperationRecord,
     PlantWateringEventRecord, UserRecord, UserSessionRecord, record_to_mapping,
 )
 from .foundation import (
@@ -714,6 +715,38 @@ class AuthStore:
             )
 
 
+class DeviceSnapshotStore:
+    def __init__(self, store: SQLiteStore) -> None:
+        self.store = store
+
+    def save(self, device_id: str, result: dict[str, Any], received_at: float | None = None) -> float:
+        timestamp = time.time() if received_at is None else received_at
+        result_json = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        with self.store.session() as session:
+            row = session.get(DeviceSnapshotRecord, device_id)
+            if row is None:
+                session.add(DeviceSnapshotRecord(
+                    device_id=device_id,
+                    result_json=result_json,
+                    received_at=timestamp,
+                ))
+            else:
+                row.result_json = result_json
+                row.received_at = timestamp
+        return timestamp
+
+    def latest(self, device_id: str) -> dict[str, Any] | None:
+        with self.store.session() as session:
+            row = session.get(DeviceSnapshotRecord, device_id)
+            if row is None:
+                return None
+            return {
+                "device_id": row.device_id,
+                "result": json.loads(row.result_json),
+                "received_at": row.received_at,
+            }
+
+
 class OperationLog:
     def __init__(self, store: SQLiteStore) -> None:
         self.store = store
@@ -915,20 +948,6 @@ class OperationLog:
                     f"controller name apply skipped operation_id={operation_id} "
                     f"device={device_name} reason={exc}"
                 )
-        elif operation_type == "device_status" and status == OP_SUCCESS:
-            try:
-                result = json.loads(row.result_json or "{}")
-                config = result.get("config") if isinstance(result, dict) else None
-                if isinstance(config, dict):
-                    DeviceRegistry(self.store).confirm_watering_settings(
-                        device_id, config, now
-                    )
-            except (json.JSONDecodeError, SmartWateringError) as exc:
-                self.log(
-                    f"status settings recovery skipped operation_id={operation_id} "
-                    f"device={device_name} reason={exc}"
-                )
-
     def is_cancelled(self, operation_id: str) -> bool:
         with self.store.session() as session:
             status = session.scalar(
@@ -1164,7 +1183,6 @@ class OperationLog:
             "sleep_enable": "sleep_enable",
             "sleep_disable": "sleep_disable",
             "sleep_interval": "sleep_interval",
-            "device_status": "device_status",
             "zero_capture": "zero_capture",
             "scale_calibration": "scale_calibration",
         }.get(operation_type, operation_type)
@@ -1333,26 +1351,6 @@ class OperationLog:
             ).all()
         return [record_to_mapping(row, fields) for row in rows]
 
-    def latest_user_visible_updated_at(self, device_id: str) -> float | None:
-        """Return a revision watermark including operations that just became terminal."""
-        with self.store.session() as session:
-            return session.scalar(
-                select(func.max(OperationRecord.updated_at)).where(
-                    OperationRecord.device_id == device_id,
-                    OperationRecord.operation_type != "device_status",
-                )
-            )
-
-    def latest_user_visible_updated_at_for_device_id(self, device_id: str) -> float | None:
-        """Return a card revision watermark for one immutable device identity."""
-        with self.store.session() as session:
-            return session.scalar(
-                select(func.max(OperationRecord.updated_at)).where(
-                    OperationRecord.device_id == device_id,
-                    OperationRecord.operation_type != "device_status",
-                )
-            )
-
     def devices_with_non_terminal(self, operation_types: set[str]) -> set[str]:
         with self.store.session() as session:
             device_ids = session.scalars(
@@ -1390,38 +1388,6 @@ class OperationLog:
             ).all()
         return [record_to_mapping(row, fields) for row in rows]
 
-    def latest_successful_result(self, device_id: str, operation_type: str) -> dict[str, Any] | None:
-        with self.store.session() as session:
-            row = session.scalars(
-                select(OperationRecord)
-                .where(
-                    OperationRecord.device_id == device_id,
-                    OperationRecord.operation_type == operation_type,
-                    OperationRecord.status == OP_SUCCESS,
-                    OperationRecord.result_json.is_not(None),
-                )
-                .order_by(OperationRecord.updated_at.desc())
-                .limit(1)
-            ).first()
-            return self._detail_without_events(row)
-
-    def latest_successful_result_for_device_id(
-        self, device_id: str, operation_type: str
-    ) -> dict[str, Any] | None:
-        with self.store.session() as session:
-            row = session.scalars(
-                select(OperationRecord)
-                .where(
-                    OperationRecord.device_id == device_id,
-                    OperationRecord.operation_type == operation_type,
-                    OperationRecord.status == OP_SUCCESS,
-                    OperationRecord.result_json.is_not(None),
-                )
-                .order_by(OperationRecord.updated_at.desc())
-                .limit(1)
-            ).first()
-            return self._detail_without_events(row)
-
     def confirmed_snapshot_patches_since(
         self, device_id: str, updated_after: float
     ) -> list[dict[str, Any]]:
@@ -1433,7 +1399,6 @@ class OperationLog:
                     OperationRecord.device_id == device_id,
                     OperationRecord.status == OP_SUCCESS,
                     OperationRecord.updated_at > updated_after,
-                    OperationRecord.operation_type != "device_status",
                 )
                 .order_by(OperationRecord.updated_at.asc())
             ).all()
@@ -1465,7 +1430,6 @@ class OperationLog:
                     OperationRecord.device_id == device_id,
                     OperationRecord.status == OP_SUCCESS,
                     OperationRecord.updated_at > updated_after,
-                    OperationRecord.operation_type != "device_status",
                 )
                 .order_by(OperationRecord.updated_at.asc())
             ).all()

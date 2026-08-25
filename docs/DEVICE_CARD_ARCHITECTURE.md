@@ -36,8 +36,11 @@ checks use a dedicated client with a one-second timeout and bounded concurrency.
 Binary `online` or `offline` results are stored in the thread-safe runtime
 `DevicePresenceRegistry`.
 
-Card and block requests never contact the MCU. The periodic snapshot worker is the
-single regular source of full MCU state and stores successful `/watering` responses.
+Card and block requests never contact the MCU. The periodic snapshot task is the
+single regular source of full MCU state and stores the latest successful `/watering`
+response in `device_snapshots`, keyed by `device_id`. Snapshot reads are runtime
+tasks, not operations: they never enter `operations`, `operation_events`, or the
+user-command queue, and a failed read is retried by the next snapshot cycle.
 The public API keeps a `DeviceRuntimeState` owner for the current normalized state.
 Snapshot/callback persistence revisions refresh that owner; projections read only a
 serializer-validated copy. If its process-local value is missing, stale, or fails
@@ -49,8 +52,9 @@ operation delta; `DeviceRuntimeState` applies deltas newer than its base snapsho
 order. This keeps snapshot-backed blocks current without making a callback masquerade
 as a full MCU snapshot or waiting for the next snapshot cycle.
 The presence monitor independently projects `online` or `offline` from its health
-probes. A device is `offline` until its first successful probe. Cards read the latest stored snapshot regardless of connectivity;
-the result without using the command queue. The refresh button follows only that
+probes. A device is `offline` until its first successful probe. Cards read the latest
+stored snapshot regardless of connectivity and without using the command queue. The
+refresh button follows only that
 advertised `refresh_card` action: it does not reload the catalog, prefetch blocks, or
 run client-side recovery. A successful action returns the complete card projected
 from the new MCU snapshot, so every block is replaced together. A failed manual read
@@ -61,8 +65,7 @@ connectivity state.
 Connectivity and workflow are separate overview fields. Connectivity never changes
 to `watering`; overview workflow is derived only from the snapshot and is therefore
 either `idle` or `watering`. Queued and applying commands are represented only by
-the operation queue. System `device_status` operations are excluded from the
-user-facing operation queue. The overview projection
+the operation queue. Snapshot tasks never appear in that queue. The overview projection
 includes `snapshot_at` when the MCU is offline and displayed values come from a
 stored snapshot.
 
@@ -539,8 +542,10 @@ The client transports them unchanged and never interprets or tracks their lifecy
 
 - `profile` versions native composition, for example `plant.v1`.
 - `schema_version` versions the block vocabulary and manifest contract.
-- `block_revision` orders updates of one block. Android keys it by `device_id:block.id`
-  and never compares revisions belonging to different blocks.
+- `block_revision` orders responses of one block. Android keys it by
+  `device_id:block.id` and never compares revisions belonging to different blocks.
+  The polled operation-queue block uses response creation time, so removing the last
+  operation still produces a newer empty response without scanning terminal history.
 - Block GET endpoints should support `ETag` and `If-None-Match`.
 - Form schemas may be referenced by a cacheable `schema_href` when many devices share the same schema. Start with embedded schemas; introduce references only when payload size justifies the complexity.
 

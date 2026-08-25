@@ -188,10 +188,11 @@ export SMART_WATERING_WORKER_MAX_WAIT_SEC=900
 
 ## Snapshotter Node
 
-The snapshotter periodically queues `device_status` reads for all registered devices.
-The worker performs the actual `/watering` requests and stores successful responses
-as operation results. The v3 card resolver consumes these snapshots internally when
-runtime presence is offline; snapshots are not exposed through a dedicated route.
+The snapshotter periodically reads `/watering` for all registered devices and stores
+one latest successful response per `device_id` in `device_snapshots`. These reads are
+runtime tasks and do not create operations, operation events, or command-queue rows.
+The v3 card resolver consumes the snapshots internally; snapshots are not exposed
+through a dedicated route.
 
 ```bash
 python -m smart_watering.jobs.snapshotter --interval-sec 300

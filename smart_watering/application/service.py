@@ -8,6 +8,7 @@ from smart_watering.domain import (
     CommandQueue,
     DeviceApiClient,
     DeviceRegistry,
+    DeviceSnapshotStore,
     OperationLog,
     PlantWateringEventStore,
     SQLiteStore,
@@ -33,6 +34,7 @@ class SmartWateringService:
         self.registry = DeviceRegistry(self.store)
         self.auth = AuthStore(self.store)
         self.operations = OperationLog(self.store)
+        self.snapshots = DeviceSnapshotStore(self.store)
         self.plant_waterings = PlantWateringEventStore(self.store)
         self.queue = CommandQueue(self.store)
         self.api = DeviceApiClient(REQUEST_TIMEOUT_SEC)
@@ -262,24 +264,12 @@ class SmartWateringService:
             f"calibrate {device.name} {weight_g:.1f} g",
         )
 
-    def queue_device_status(self, device_id: str) -> str:
-        device = self.registry.get_by_id(device_id)
-        return self._enqueue(
-            device, "device_status", "/watering", None,
-            f"read status {device.name}", method="GET",
-        )
-
-    def request_device_status_snapshot(self, device_id: str) -> str:
+    def request_device_status_snapshot(self, device_id: str) -> float:
         """Fetch and persist a status snapshot immediately, without the command queue."""
         device = self.registry.get_by_id(device_id)
         result = self.api.request_json(device.base_url, "/watering", "GET")
-        operation_id = self.operations.create(device.id, "device_status", {})
-        self.operations.update_result(operation_id, result)
-        self.operations.event(
-            operation_id,
-            OP_SUCCESS,
-            "status fetched manually",
-            source="backend",
-            event_type="operation.succeeded",
-        )
-        return operation_id
+        received_at = self.snapshots.save(device.id, result)
+        config = result.get("config")
+        if isinstance(config, dict):
+            self.registry.confirm_watering_settings(device.id, config, received_at)
+        return received_at

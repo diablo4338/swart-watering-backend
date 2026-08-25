@@ -618,14 +618,14 @@ def test_confirmed_rename_preserves_device_identity_and_related_data() -> None:
                 "amount_g": 50.0,
             },
         )
-        operation_id = app.operations.create(device.id, "device_status", {})
+        app.snapshots.save(device.id, {"config": {"dry_weight_g": 120}}, 2.0)
 
         renamed = app.registry.rename_backend(device.id, "fern")
 
         assert renamed.id == device.id
         assert app.registry.watering_settings(device.id)["dry_weight_g"] == 120
         assert len(app.plant_waterings.list_valid(device.id)) == 1
-        assert app.operations.detail(operation_id)["device"] == "fern"
+        assert app.snapshots.latest(device.id)["result"]["config"]["dry_weight_g"] == 120
 
 
 def test_backend_rename_does_not_move_queued_work_to_another_worker_key() -> None:
@@ -663,23 +663,22 @@ def test_backend_rename_does_not_move_queued_work_to_another_worker_key() -> Non
         assert app.queue.list() == []
 
 
-def test_successful_status_recovers_missing_watering_settings() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        device = app.registry.add("192.168.1.10", "plant", "fern")
-        operation_id = app.operations.create(device.id, "device_status", {})
-        app.operations.update_result(
-            operation_id,
-            {
+def test_successful_snapshot_recovers_missing_watering_settings() -> None:
+    class StatusApi:
+        def request_json(self, base_url, path, method, payload=None):
+            return {
                 "config": {
                     "dry_weight_g": 120,
                     "wet_weight_g": 510,
                     "watering_loss_threshold_percent": 35,
                 }
-            },
-        )
+            }
 
-        app.operations.event(operation_id, "success", "status_received")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        device = app.registry.add("192.168.1.10", "plant", "fern")
+        app.api = StatusApi()
+        app.request_device_status_snapshot(device.id)
 
         settings = app.registry.watering_settings(app.registry.get("fern").id)
         assert settings["dry_weight_g"] == 120
@@ -1325,38 +1324,23 @@ def test_cli_rejected_config_conflict_does_not_wait_for_existing_operation(monke
         assert "waiting for controller result" not in output
 
 
-def test_device_status_command_deduplicates_identical_queued_command() -> None:
+def test_snapshotter_stores_status_without_operations_or_commands() -> None:
+    class StatusApi:
+        def request_json(self, base_url, path, method, payload=None):
+            return {"device": {"name": base_url}, "config": {}, "weight": {}}
+
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("192.168.1.10", "plant", "plant_1")
-
-        first_operation_id = app.queue_device_status("plant_1")
-        second_operation_id = app.queue_device_status("plant_1")
-
-        commands = app.queue.list()
-        assert second_operation_id == first_operation_id
-        assert [command.operation_id for command in commands] == [first_operation_id]
-        assert commands[0].method == "GET"
-        assert commands[0].path == "/watering"
-        assert commands[0].payload is None
-        operation = app.operations.detail(first_operation_id)
-        assert operation["type"] == "device_status"
-        assert operation["payload"]["operation_id"] == first_operation_id
-
-
-def test_snapshotter_queues_status_for_registered_devices() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("192.168.1.10", "plant", "plant_1")
-        app.registry.add("192.168.1.11", "plant", "plant_2")
+        first = app.registry.add("192.168.1.10", "plant", "plant_1")
+        second = app.registry.add("192.168.1.11", "plant", "plant_2")
+        app.api = StatusApi()
         scheduler = snapshotter.StatusSnapshotScheduler(app, interval_sec=60)
 
-        assert scheduler.enqueue_once() == 2
-        assert scheduler.enqueue_once() == 0
-
-        commands = app.queue.list()
-        assert [command.device_name for command in commands] == ["plant_1", "plant_2"]
-        assert [command.path for command in commands] == ["/watering", "/watering"]
+        assert scheduler.capture_once() == 2
+        assert app.snapshots.latest(first.id) is not None
+        assert app.snapshots.latest(second.id) is not None
+        assert app.queue.list() == []
+        assert app.operations.list_recent() == []
 
 
 def test_snapshotter_uses_interval_from_env(monkeypatch) -> None:
@@ -1641,7 +1625,7 @@ def test_sleep_interval_retries_until_controller_wakes() -> None:
         ]
 
 
-def test_worker_stores_device_status_result() -> None:
+def test_snapshot_request_stores_device_status_result_without_operation() -> None:
     class StatusApi:
         def request_json(self, base_url, path, method, payload=None):
             assert method == "GET"
@@ -1655,25 +1639,17 @@ def test_worker_stores_device_status_result() -> None:
 
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("192.168.1.10", "plant", "plant_1")
-        worker = smart_core.BackgroundWorker(
-            StatusApi(),
-            app.queue,
-            app.operations,
-            smart_core.WorkerState(str(Path(temp_dir) / "worker.pid")),
-            retry_interval_sec=0,
-            max_wait_sec=1,
-        )
+        device = app.registry.add("192.168.1.10", "plant", "plant_1")
+        app.api = StatusApi()
 
-        operation_id = app.queue_device_status("plant_1")
-        worker.run()
+        app.request_device_status_snapshot(device.id)
 
-        operation = app.operations.detail(operation_id)
-        assert operation["status"] == "success"
-        assert operation["result"]["device"]["name"] == "plant_1"
-        assert operation["result"]["config"]["sleep_interval_min"] == 20
-        assert isinstance(operation["result_received_at"], float)
-        assert [event["status"] for event in app.operations.events(operation_id) if app.operations.is_status_event(event)] == ["queued", "sending", "success"]
+        snapshot = app.snapshots.latest(device.id)
+        assert snapshot["result"]["device"]["name"] == "plant_1"
+        assert snapshot["result"]["config"]["sleep_interval_min"] == 20
+        assert isinstance(snapshot["received_at"], float)
+        assert app.queue.list() == []
+        assert app.operations.list_recent() == []
 
 
 def test_operation_status_does_not_regress_after_terminal_event() -> None:
@@ -1779,7 +1755,7 @@ def test_interactive_trace_operation_prints_structured_timeline(monkeypatch, cap
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         device = app.registry.add("192.168.1.10", "plant", "plant_1")
-        operation_id = app.operations.create(device.id, "device_status", {})
+        operation_id = app.operations.create(device.id, "device_config", {})
         app.operations.trace_event(
             operation_id, "worker", "command.picked", "worker picked operation",
             {"path": "/watering"},
@@ -2761,13 +2737,11 @@ def test_successful_sleep_callback_records_runtime_patch_without_mutating_snapsh
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         device = app.registry.add("192.168.1.10", "plant", "plant_1")
-        snapshot_id = app.operations.create(device.id, "device_status", {})
-        app.operations.update_result(snapshot_id, {
+        app.snapshots.save(device.id, {
             "device": {"name": "plant_1", "type": "plant"},
             "config": {"sleep_disabled": True, "sleep_interval_min": 20},
             "watering": {"active": False, "state": "waiting"},
-        })
-        app.operations.event(snapshot_id, "success", "status fetched")
+        }, 1.0)
         operation_id = app.queue_sleep("plant_1", True)
 
         CallbackService(app.operations).record({
@@ -2779,14 +2753,14 @@ def test_successful_sleep_callback_records_runtime_patch_without_mutating_snapsh
         app.operations.event(operation_id, "accepted", "device accepted command")
 
         operation = app.operations.get(operation_id)
-        snapshot = app.operations.latest_successful_result(device.id, "device_status")
+        snapshot = app.snapshots.latest(device.id)
         assert operation["status"] == "success"
         assert snapshot["result"]["config"] == {
             "sleep_disabled": True,
             "sleep_interval_min": 20,
         }
         patches = app.operations.confirmed_snapshot_patches_since(
-            device.id, snapshot["updated_at"]
+            device.id, snapshot["received_at"]
         )
         assert patches[-1]["patch"] == {"config": {"sleep_disabled": False}}
 
@@ -3197,23 +3171,15 @@ def test_public_api_status_latest_returns_minimal_snapshot_result() -> None:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         app.registry.add("192.168.1.10", "plant", "plant_1")
         app.api = StatusApi()
-        operation_id = app.queue_device_status("plant_1")
-        worker = smart_core.BackgroundWorker(
-            app.api,
-            app.queue,
-            app.operations,
-            smart_core.WorkerState(str(Path(temp_dir) / "worker.pid")),
-            retry_interval_sec=0,
-            max_wait_sec=1,
-        )
-        worker.run()
+        device = app.registry.get("plant_1")
+        app.request_device_status_snapshot(device.id)
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
         body = service.project_snapshot_device_state(app.registry.get("plant_1").id)
         assert body["status"] == "offline"
         assert body["source"] == "snapshot"
         assert body["available"] is True
-        assert body["operation_id"] == operation_id
+        assert body["operation_id"] is None
         assert body["result"] == {
             "device": {"name": "plant_1", "type": "plant"},
             "watering": {
@@ -3291,16 +3257,8 @@ def test_public_api_status_latest_returns_snapshot_without_live_request() -> Non
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         app.registry.add("192.168.1.10", "plant", "plant_1")
         app.api = StatusApi(True)
-        operation_id = app.queue_device_status("plant_1")
-        worker = smart_core.BackgroundWorker(
-            app.api,
-            app.queue,
-            app.operations,
-            smart_core.WorkerState(str(Path(temp_dir) / "worker.pid")),
-            retry_interval_sec=0,
-            max_wait_sec=1,
-        )
-        worker.run()
+        device = app.registry.get("plant_1")
+        app.request_device_status_snapshot(device.id)
         app.api = StatusApi(False)
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
@@ -3308,7 +3266,7 @@ def test_public_api_status_latest_returns_snapshot_without_live_request() -> Non
         assert body["status"] == "offline"
         assert body["source"] == "snapshot"
         assert body["available"] is True
-        assert body["operation_id"] == operation_id
+        assert body["operation_id"] is None
         assert "pending_operation_url" not in body
         assert body["result"]["config"] == {
             "target_g": None,
@@ -3344,16 +3302,7 @@ def test_public_api_status_live_does_not_fall_back_to_snapshot() -> None:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         app.registry.add("192.168.1.10", "plant", "plant_1")
         app.api = StatusApi(True)
-        app.queue_device_status("plant_1")
-        worker = smart_core.BackgroundWorker(
-            app.api,
-            app.queue,
-            app.operations,
-            smart_core.WorkerState(str(Path(temp_dir) / "worker.pid")),
-            retry_interval_sec=0,
-            max_wait_sec=1,
-        )
-        worker.run()
+        app.request_device_status_snapshot(app.registry.get("plant_1").id)
         app.api = StatusApi(False)
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
@@ -3384,7 +3333,6 @@ def test_public_api_status_latest_does_not_mix_pending_operation_without_snapsho
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         app.registry.add("192.168.1.10", "plant", "plant_1")
         app.api = SleepingApi()
-        app.queue_device_status("plant_1")
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
         body = service.project_snapshot_device_state(app.registry.get("plant_1").id)
@@ -3413,24 +3361,14 @@ def test_public_api_status_latest_does_not_mix_pending_operation_with_snapshot()
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         app.registry.add("192.168.1.10", "plant", "plant_1")
         app.api = StatusApi(True)
-        completed_operation_id = app.queue_device_status("plant_1")
-        worker = smart_core.BackgroundWorker(
-            app.api,
-            app.queue,
-            app.operations,
-            smart_core.WorkerState(str(Path(temp_dir) / "worker.pid")),
-            retry_interval_sec=0,
-            max_wait_sec=1,
-        )
-        worker.run()
-        app.queue_device_status("plant_1")
+        app.request_device_status_snapshot(app.registry.get("plant_1").id)
         app.api = StatusApi(False)
         service = DeviceStateProjectionService(app, "http://127.0.0.1:9090", ZoneInfo("Europe/Berlin"))
 
         body = service.project_snapshot_device_state(app.registry.get("plant_1").id)
         assert body["source"] == "snapshot"
         assert body["available"] is True
-        assert body["operation_id"] == completed_operation_id
+        assert body["operation_id"] is None
         assert "pending_operation_id" not in body
         assert "pending_operation_status" not in body
 

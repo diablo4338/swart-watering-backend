@@ -93,6 +93,16 @@ class OperationEventRecord(Base):
     created_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class DeviceSnapshotRecord(Base):
+    __tablename__ = "device_snapshots"
+
+    device_id: Mapped[str] = mapped_column(
+        String, ForeignKey("devices.id", ondelete="CASCADE"), primary_key=True,
+    )
+    result_json: Mapped[str] = mapped_column(String, nullable=False)
+    received_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
 class CommandQueueRecord(Base):
     __tablename__ = "command_queue"
 

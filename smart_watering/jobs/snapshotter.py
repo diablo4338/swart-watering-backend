@@ -41,7 +41,7 @@ class StatusSnapshotScheduler:
     def log(message: str) -> None:
         print(f"snapshotter: {message}", flush=True)
 
-    def enqueue_once(self) -> int:
+    def capture_once(self) -> int:
         devices = self.app.registry.list()
         if not devices:
             if not self._was_idle:
@@ -50,25 +50,21 @@ class StatusSnapshotScheduler:
             return 0
 
         self._was_idle = False
-        queued = 0
+        captured = 0
         for device in devices:
-            existing = self.app.queue.find_duplicate(
-                device.base_url, "/watering", "GET", None
-            )
-            if existing is not None:
-                self.log(
-                    f"snapshot already pending device={device.name} operation_id={existing}"
-                )
+            try:
+                self.app.request_device_status_snapshot(device.id)
+            except SmartWateringError as exc:
+                self.log(f"snapshot failed device={device.name} error={exc}")
                 continue
-            operation_id = self.app.queue_device_status(device.id)
-            queued += 1
-            self.log(f"queued device_status device={device.name} operation_id={operation_id}")
-        return queued
+            captured += 1
+            self.log(f"snapshot stored device={device.name}")
+        return captured
 
     def run_forever(self) -> int:
         self.log(f"started interval={self.interval_sec}s")
         while True:
-            self.enqueue_once()
+            self.capture_once()
             time.sleep(self.interval_sec)
 
 
@@ -92,7 +88,7 @@ class SnapshotterApp:
         args = self.build_parser().parse_args(argv)
         scheduler = StatusSnapshotScheduler(self.app, args.interval_sec)
         if args.once:
-            scheduler.enqueue_once()
+            scheduler.capture_once()
             return 0
         return scheduler.run_forever()
 
