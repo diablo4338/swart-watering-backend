@@ -119,13 +119,14 @@ class SmartWateringService:
         confirm_retry_duplicate: bool = False,
     ) -> str | None:
         self.registry.validate_config_update(device.id, config)
-        payload = {
-            "device_type": config.get("device_type", device.device_type),
-            "name": config.get("name", device.controller_name),
-        }
         if "backend_name" in config:
-            payload["backend_name"] = config["backend_name"]
+            device = self.registry.rename_backend(device.id, str(config["backend_name"]))
+        payload: dict = {}
+        if "device_type" in config:
+            payload["device_type"] = config["device_type"]
         payload.update({key: config[key] for key in CONFIG_FLOAT_KEYS if key in config})
+        if not payload:
+            return None
         duplicate = self.queue.find_duplicate(device.base_url, "/config", "POST", payload)
         if duplicate is not None:
             return duplicate
@@ -273,3 +274,10 @@ class SmartWateringService:
         if isinstance(config, dict):
             self.registry.confirm_watering_settings(device.id, config, received_at)
         return received_at
+
+    def latest_mcu_name(self, device_id: str) -> str | None:
+        snapshot = self.snapshots.latest(device_id)
+        result = snapshot.get("result") if snapshot is not None else None
+        reported_device = result.get("device") if isinstance(result, dict) else None
+        name = reported_device.get("name") if isinstance(reported_device, dict) else None
+        return name if isinstance(name, str) and name else None

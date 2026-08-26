@@ -338,7 +338,7 @@ def test_v3_device_card_exposes_server_driven_blocks_and_actions() -> None:
         runtime.presence.mark_offline("avocado", "test offline")
 
         manual_snapshot = {
-            "device": {"name": "avocado", "type": "plant"},
+            "device": {"name": "wired", "type": "plant"},
             "watering": {"active": False, "state": "waiting"},
             "config": {
                 "dry_weight_g": 1000,
@@ -360,6 +360,8 @@ def test_v3_device_card_exposes_server_driven_blocks_and_actions() -> None:
             block["id"]: block for block in refreshed.json()["card"]["blocks"]
         }
         assert refreshed_blocks["overview"]["data"]["workflow"]["code"] == "idle"
+        assert refreshed_blocks["overview"]["data"]["title"] == "avocado"
+        assert refreshed_blocks["overview"]["data"]["subtitle"] == "MCU: wired"
         assert refreshed_blocks["operation_queue"]["data"] == {"items": []}
         stored_snapshot = cli.snapshots.latest(device_id)
         assert stored_snapshot is not None

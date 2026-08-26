@@ -617,8 +617,9 @@ class SmartWateringCliApp(SmartWateringService):
         if not devices:
             raise SmartWateringError("no registered devices")
         for index, device in enumerate(devices, start=1):
+            mcu_name = self.latest_mcu_name(device.id) or "unavailable"
             print(
-                f"{index}. backend={device.name} MCU_ID={device.controller_name} "
+                f"{index}. backend={device.name} MCU_ID={mcu_name} "
                 f"({device.device_type}) {device.ip}"
             )
         while True:
@@ -723,7 +724,7 @@ class SmartWateringCliApp(SmartWateringService):
         device = self.choose_device("Change MCU ID")
         if device is None:
             return
-        controller_id = self.prompt("New MCU ID", device.controller_name)
+        controller_id = self.prompt("New MCU ID", self.latest_mcu_name(device.id))
         operation_id = self.queue_controller_name(device.id, controller_id)
         self.report_operation(operation_id)
 
@@ -765,9 +766,10 @@ class SmartWateringCliApp(SmartWateringService):
                 # Resolve the record again on every pass, then use this exact
                 # device's URL for both the read and the no-op config write.
                 device = self.registry.get(registered_device.name)
+                mcu_name = self.latest_mcu_name(device.id) or "unavailable"
                 print(
                     f"probe {attempt}: backend={device.name} "
-                    f"MCU_ID={device.controller_name} address={device.base_url}"
+                    f"MCU_ID={mcu_name} address={device.base_url}"
                 )
                 operation_id: str | None = None
                 device_deadline = min(
@@ -838,9 +840,12 @@ class SmartWateringCliApp(SmartWateringService):
                         data = event.get("data") or {}
                         elapsed = time.monotonic() - started_at
                         print("callback check: SUCCESS")
+                        received_mcu_name = (
+                            self.latest_mcu_name(received_device.id) or "unavailable"
+                        )
                         print(
                             f"device: backend={received_device.name} "
-                            f"MCU_ID={received_device.controller_name}"
+                            f"MCU_ID={received_mcu_name}"
                         )
                         print(f"operation_id: {received_operation_id}")
                         print(f"callback status: {data.get('status', 'unknown')}")

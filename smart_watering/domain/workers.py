@@ -27,7 +27,7 @@ from .foundation import (
     SmartWateringError,
     discovered_device_config,
 )
-from .repositories import CommandQueue, DeviceRegistry, OperationLog
+from .repositories import CommandQueue, DeviceRegistry, DeviceSnapshotStore, OperationLog
 
 class WorkerState:
     def __init__(self, pid_path: str = WORKER_PID_PATH) -> None:
@@ -196,9 +196,10 @@ class BackgroundWorker:
     def _complete_discovery(self, command: QueuedCommand, response: dict[str, Any]) -> str:
         name, device_type, settings = discovered_device_config(response)
         registry = DeviceRegistry(self.queue.store)
-        device = registry.upsert_discovered(command.base_url, device_type, name)
+        device = registry.register_discovered(command.base_url, device_type, name)
         if settings:
             registry.confirm_watering_settings(device.id, settings, time.time())
+        DeviceSnapshotStore(self.queue.store).save(device.id, response)
         self.operations.update_payload(
             command.operation_id,
             {"base_url": command.base_url, "discovered_name": name, **settings},

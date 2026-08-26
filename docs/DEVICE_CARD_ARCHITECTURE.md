@@ -40,7 +40,16 @@ Card and block requests never contact the MCU. The periodic snapshot task is the
 single regular source of full MCU state and stores the latest successful `/watering`
 response in `device_snapshots`, keyed by `device_id`. Snapshot reads are runtime
 tasks, not operations: they never enter `operations`, `operation_events`, or the
-user-command queue, and a failed read is retried by the next snapshot cycle.
+user-command queue, and a failed read is retried by the next snapshot cycle. A
+successful discovery response is stored as the new device's first snapshot.
+
+The device card is one projection assembled from two owners. The registry owns
+backend metadata such as `devices.name`; the persisted snapshot and
+`DeviceRuntimeState` own all MCU-reported fields, including `device.name`. A snapshot
+replaces the base runtime state and confirmed callbacks apply patches to it. MCU state
+must never be copied into `devices` or projected from registry fields. Consequently
+the overview title comes from `devices.name`, while its MCU subtitle comes from the
+current runtime projection's `result.device.name`.
 The public API keeps a `DeviceRuntimeState` owner for the current normalized state.
 Snapshot/callback persistence revisions refresh that owner; projections read only a
 serializer-validated copy. If its process-local value is missing, stale, or fails
@@ -119,12 +128,11 @@ needed by its blocks, but every block builder receives only the sources allowed 
 this table. A per-block endpoint loads only that block's allowed sources.
 
 Every independently fetched block response has its own `block_revision`. There is
-no card-wide revision and revisions from different blocks are never compared.
-Block revision watermarks may include source metadata that is not rendered. In
-particular, overview revision includes the latest presence probe timestamp, and the
-operation-queue revision includes the latest user-visible operation update even when
-that update made the operation terminal and removed it from the rendered list. This
-prevents the client from rejecting a disappearance or connectivity change as stale.
+no card-wide revision and revisions from different blocks are never compared. A
+revision is calculated directly from the timestamps of that block's declared sources;
+there is no separately persisted watermark state. Overview includes the latest
+presence probe timestamp, while operation queue uses the updates of the operations it
+actually projects.
 
 ### Backend naming
 

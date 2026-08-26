@@ -686,6 +686,29 @@ def test_successful_snapshot_recovers_missing_watering_settings() -> None:
         assert settings["watering_loss_threshold_percent"] == 35
 
 
+def test_successful_snapshot_owns_mcu_name_without_renaming_backend() -> None:
+    class StatusApi:
+        def request_json(self, base_url, path, method, payload=None):
+            return {
+                "device": {"name": "avokado", "type": "plant"},
+                "config": {},
+                "weight": {},
+            }
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
+        device = app.registry.add("192.168.1.10", "plant", "wired")
+        app.registry.rename_backend(device.id, "avakado")
+        app.api = StatusApi()
+
+        app.request_device_status_snapshot(device.id)
+
+        reconciled = app.registry.get_by_id(device.id)
+        assert reconciled.name == "avakado"
+        assert app.latest_mcu_name(device.id) == "avokado"
+        assert not hasattr(reconciled, "controller_name")
+
+
 def test_watering_setting_dates_are_updated_per_field_after_confirmed_changes() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
@@ -739,7 +762,7 @@ def test_registry_assigns_default_plant_names() -> None:
         assert second.name == "plant_2"
 
 
-def test_registry_suffixes_duplicate_controller_name_without_changing_it() -> None:
+def test_registry_suffixes_duplicate_backend_names() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         registry = smart_core.DeviceRegistry(make_store(temp_dir))
 
@@ -750,8 +773,6 @@ def test_registry_suffixes_duplicate_controller_name_without_changing_it() -> No
         assert first.name == "plant_1"
         assert second.name == "plant_1_1"
         assert third.name == "plant_1_2"
-        assert second.controller_name == "plant_1"
-        assert third.controller_name == "plant_1"
 
 
 def test_device_selector_shows_backend_name_and_controller_id(monkeypatch, capsys) -> None:
@@ -759,13 +780,17 @@ def test_device_selector_shows_backend_name_and_controller_id(monkeypatch, capsy
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         device = app.registry.add("192.168.1.10", "plant", "fern")
         app.registry.rename_backend(device.id, "office")
+        app.snapshots.save(device.id, {
+            "device": {"name": "fern", "type": "plant"},
+            "watering": {}, "config": {}, "weight": {},
+        })
         monkeypatch.setattr("builtins.input", lambda _prompt: "1")
 
         selected = app.choose_device("Change MCU ID")
 
         assert selected is not None
         assert selected.name == "office"
-        assert selected.controller_name == "fern"
+        assert app.latest_mcu_name(selected.id) == "fern"
         assert (
             "1. backend=office MCU_ID=fern (plant) 192.168.1.10"
             in capsys.readouterr().out
@@ -792,41 +817,41 @@ def test_interactive_configure_device_routes_name_to_backend_name(monkeypatch) -
         app.interactive_configure_device()
 
         operation = app.operations.latest_for_device(device.id, "config")
-        assert operation is not None
-        assert operation["payload"]["backend_name"] == "test"
-        assert operation["payload"]["device_type"] == "plant"
-        assert operation["payload"]["name"] == "dev_board"
-        assert app.registry.get("plant_1").name == "plant_1"
+        assert operation is None
+        assert app.registry.get_by_id(device.id).name == "test"
 
 
-def test_controller_id_change_is_persisted_only_after_success_callback() -> None:
+def test_controller_id_change_is_projected_only_after_success_callback() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         app.registry.add("192.168.1.10", "plant", "fern")
 
         operation_id = app.queue_controller_name("fern", "same id allowed")
 
-        assert app.registry.get("fern").controller_name == "fern"
+        assert app.latest_mcu_name(app.registry.get("fern").id) is None
         app.operations.event(operation_id, "accepted", "accepted")
-        assert app.registry.get("fern").controller_name == "fern"
+        assert app.operations.confirmed_snapshot_patches_since(
+            app.registry.get("fern").id, 0
+        ) == []
         app.operations.event(operation_id, "success", "config_updated")
-        assert app.registry.get("fern").controller_name == "same id allowed"
         assert app.registry.get("fern").name == "fern"
+        assert app.operations.confirmed_snapshot_patches_since(
+            app.registry.get("fern").id, 0
+        )[-1]["patch"] == {"device": {"name": "same id allowed", "type": "plant"}}
 
 
-def test_discovery_keeps_same_controller_names_as_separate_backend_devices() -> None:
+def test_discovery_allocates_separate_backend_devices_for_each_temporary_target() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         registry = smart_core.DeviceRegistry(make_store(temp_dir))
 
-        first = registry.upsert_discovered("192.168.1.10", "plant", "fern")
-        second = registry.upsert_discovered("192.168.1.11", "plant", "fern")
-        rediscovered = registry.upsert_discovered("192.168.1.11", "plant", "fern")
+        first = registry.register_discovered("192.168.1.10", "plant", "fern")
+        second = registry.register_discovered("192.168.1.11", "plant", "fern")
+        third = registry.register_discovered("192.168.1.11", "plant", "fern")
 
         assert first.name == "fern"
         assert second.name == "fern_1"
-        assert second.controller_name == "fern"
-        assert rediscovered.id == second.id
-        assert [device.name for device in registry.list()] == ["fern", "fern_1"]
+        assert third.name == "fern_2"
+        assert [device.name for device in registry.list()] == ["fern", "fern_1", "fern_2"]
 
 
 def test_registry_rejects_backend_rename_to_existing_device_name() -> None:
@@ -843,7 +868,7 @@ def test_registry_rejects_backend_rename_to_existing_device_name() -> None:
             raise AssertionError("expected SmartWateringError")
 
 
-def test_registry_applies_pending_backend_name_only_with_confirmed_config() -> None:
+def test_confirmed_mcu_config_cannot_change_backend_name() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         registry = smart_core.DeviceRegistry(make_store(temp_dir))
         device = registry.add("192.168.1.10", "plant", "plant_1")
@@ -854,13 +879,14 @@ def test_registry_applies_pending_backend_name_only_with_confirmed_config() -> N
 
         assert desired.name == "new"
         assert registry.get("plant_1").name == "plant_1"
-        registry.apply_confirmed_config(
+        updated = registry.apply_confirmed_config(
             device.id, {"backend_name": "new", "device_type": "plant"}
         )
-        assert registry.get("new").controller_name == "plant_1"
+        assert updated.name == "plant_1"
+        assert registry.get_by_id(device.id).name == "plant_1"
 
 
-def test_config_success_callback_applies_pending_backend_name() -> None:
+def test_backend_name_is_applied_locally_and_never_sent_to_controller() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         device = add_confirmed_tank(app)
@@ -871,10 +897,11 @@ def test_config_success_callback_applies_pending_backend_name() -> None:
         )
 
         assert operation_id is not None
-        assert app.registry.get("main_tank").name == "main_tank"
+        assert app.registry.get_by_id(device.id).name == "new"
+        assert "backend_name" not in app.operations.detail(operation_id)["payload"]
         app.operations.event(operation_id, smart_core.OP_SUCCESS, "config_updated")
 
-        assert app.registry.get("new").controller_name == "main_tank"
+        assert app.registry.get("new").name == "new"
         assert app.operations.get(operation_id)["status"] == smart_core.OP_SUCCESS
 
 
@@ -906,13 +933,11 @@ def test_registry_add_tank_with_duplicate_controller_name_creates_separate_devic
         updated = registry.add("192.168.1.99", "tank", "plant_1")
 
         assert updated.name == "plant_1_1"
-        assert updated.controller_name == "plant_1"
         assert updated.device_type == "plant"
         assert updated.ip == "192.168.1.99"
         assert registry.get("plant_1").device_type == "plant"
         registry.apply_confirmed_config(updated.id, {"device_type": "tank"})
         assert registry.get("plant_1_1").device_type == "tank"
-        assert registry.get("plant_1_1").controller_name == "plant_1"
         assert registry.get("plant_1").ip == "192.168.1.10"
         assert registry.get("main_tank").device_type == "plant"
 
@@ -957,7 +982,6 @@ def test_device_config_updates_registry_only_after_controller_success() -> None:
 
         updated = app.registry.get("plant_1")
         assert updated.device_type == "tank"
-        assert updated.controller_name == "plant_1"
 
 
 def test_parse_config_assignments_supports_aliases() -> None:
@@ -1116,7 +1140,7 @@ def test_watering_start_reconfirms_failed_tank_config_before_fill() -> None:
         commands = app.queue.list()
         assert [command.path for command in commands] == ["/config", "/watering/start"]
         assert commands[0].payload["device_type"] == "tank"
-        assert commands[0].payload["name"] == "main_tank"
+        assert "name" not in commands[0].payload
         assert commands[1].operation_id == fill_operation_id
 
 
@@ -1286,8 +1310,8 @@ def test_cli_warns_before_adding_conflicting_config_command(monkeypatch, capsys)
 
         output = capsys.readouterr().out
         assert output.count("warning: retryable command already queued") == 2
-        assert output.count("queued: device_type=plant, dry_weight_g=100.0, name=plant_1") == 2
-        assert output.count("new: device_type=plant, dry_weight_g=120.0, name=plant_1") == 2
+        assert output.count("queued: dry_weight_g=100.0") == 2
+        assert output.count("new: dry_weight_g=120.0") == 2
         assert "cancelled: new command was not queued; existing operation kept" in output
 
 
@@ -2130,6 +2154,8 @@ def test_cli_can_defer_offline_device_discovery_to_worker(capsys) -> None:
         assert settings["dry_weight_g"] == 140
         assert settings["wet_weight_g"] == 520
         assert settings["watering_loss_threshold_percent"] == 30
+        assert app.snapshots.latest(device.id)["result"]["device"]["name"] == "sleepy_plant"
+        assert app.latest_mcu_name(device.id) == "sleepy_plant"
         assert app.queue.list() == []
         assert "discovery is read-only" in capsys.readouterr().out
 

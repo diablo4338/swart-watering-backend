@@ -66,14 +66,14 @@ class DeviceRegistry:
         return f"{DeviceType.PLANT}_{index}"
 
     @staticmethod
-    def allocate_backend_name(session: Session, controller_name: str) -> str:
+    def allocate_backend_name(session: Session, preferred_name: str) -> str:
         used = set(session.scalars(select(DeviceRecord.name)).all())
-        if controller_name not in used:
-            return controller_name
+        if preferred_name not in used:
+            return preferred_name
         index = 1
-        while f"{controller_name}_{index}" in used:
+        while f"{preferred_name}_{index}" in used:
             index += 1
-        return f"{controller_name}_{index}"
+        return f"{preferred_name}_{index}"
 
     @staticmethod
     def demote_other_tanks(session: Session, tank_name: str, updated_at: float) -> None:
@@ -93,21 +93,14 @@ class DeviceRegistry:
 
         ip, base_url = self.normalize_base_url(ip_or_url)
         now = time.time()
-        controller_name = name or self.next_name(device_type)
+        backend_name = name or self.next_name(device_type)
 
         with self.store.session() as session:
-            existing = session.scalar(select(DeviceRecord).where(
-                DeviceRecord.base_url == base_url,
-                DeviceRecord.controller_name == controller_name,
-            ))
-            if existing is not None:
-                return self.get(existing.name)
-            device_name = self.allocate_backend_name(session, controller_name)
+            device_name = self.allocate_backend_name(session, backend_name)
 
             session.add(
                 DeviceRecord(
                     name=device_name,
-                    controller_name=controller_name,
                     ip=ip,
                     base_url=base_url,
                     device_type=DeviceType.PLANT,
@@ -118,8 +111,8 @@ class DeviceRegistry:
 
         return self.get(device_name)
 
-    def upsert_discovered(self, ip_or_url: str, device_type: str, name: str) -> Device:
-        """Store the identity reported by an online controller without changing it."""
+    def register_discovered(self, ip_or_url: str, device_type: str, name: str) -> Device:
+        """Register a discovery target and use its MCU label as the initial backend label."""
         if device_type not in DEVICE_TYPES:
             raise SmartWateringError(f"unsupported device type: {device_type}")
         if not name:
@@ -128,32 +121,19 @@ class DeviceRegistry:
         ip, base_url = self.normalize_base_url(ip_or_url)
         now = time.time()
         with self.store.session() as session:
-            existing = session.scalar(select(DeviceRecord).where(
-                DeviceRecord.base_url == base_url,
-                DeviceRecord.controller_name == name,
-            ))
-            backend_name = existing.name if existing is not None else self.allocate_backend_name(session, name)
+            backend_name = self.allocate_backend_name(session, name)
             if device_type == DeviceType.TANK:
                 self.demote_other_tanks(session, backend_name, now)
-            if existing is None:
-                session.add(
-                    DeviceRecord(
-                        name=backend_name,
-                        controller_name=name,
-                        ip=ip,
-                        base_url=base_url,
-                        device_type=device_type,
-                        created_at=now,
-                        updated_at=now,
-                    )
+            session.add(
+                DeviceRecord(
+                    name=backend_name,
+                    ip=ip,
+                    base_url=base_url,
+                    device_type=device_type,
+                    created_at=now,
+                    updated_at=now,
                 )
-                created_at = now
-            else:
-                existing.ip = ip
-                existing.base_url = base_url
-                existing.device_type = device_type
-                existing.updated_at = now
-                created_at = existing.created_at
+            )
 
         return self.get(backend_name)
 
@@ -175,17 +155,13 @@ class DeviceRegistry:
             if new_name != device.name and session.scalar(select(DeviceRecord).where(DeviceRecord.name == new_name)) is not None:
                 raise DeviceNameConflictError(f"device name already exists: {new_name}")
 
-        controller_name = device.controller_name
         return Device(
             device.id, new_name, device.ip, device.base_url, new_type,
-            device.created_at, time.time(), controller_name,
+            device.created_at, time.time(),
         )
 
     def apply_confirmed_config(self, device_id: str, config: dict[str, Any]) -> Device:
         device = self.get_by_id(device_id)
-        new_name = str(config.get("backend_name", device.name)).strip()
-        if not new_name:
-            raise SmartWateringError("device name must not be empty")
         new_type = str(config.get("device_type", device.device_type))
 
         if new_type not in DEVICE_TYPES:
@@ -194,26 +170,19 @@ class DeviceRegistry:
         now = time.time()
         with self.store.session() as session:
             if new_type == DeviceType.TANK:
-                self.demote_other_tanks(session, new_name, now)
+                self.demote_other_tanks(session, device.name, now)
 
             updated = session.get(DeviceRecord, device.id)
             if updated is None:
                 raise SmartWateringError(f"unknown device id: {device_id}")
             updated.ip = device.ip
             updated.base_url = device.base_url
-            updated.name = new_name
             updated.device_type = new_type
             updated.updated_at = now
-            try:
-                session.flush()
-            except IntegrityError as exc:
-                raise DeviceNameConflictError(
-                    f"device name already exists: {new_name}"
-                ) from exc
 
         return Device(
-            device.id, new_name, device.ip, device.base_url, new_type,
-            device.created_at, now, device.controller_name,
+            device.id, device.name, device.ip, device.base_url, new_type,
+            device.created_at, now,
         )
 
     def list(self) -> list[Device]:
@@ -222,7 +191,7 @@ class DeviceRegistry:
         return [
             Device(
                 row.id, row.name, row.ip, row.base_url, row.device_type,
-                row.created_at, row.updated_at, row.controller_name,
+                row.created_at, row.updated_at,
             )
             for row in rows
         ]
@@ -236,7 +205,7 @@ class DeviceRegistry:
 
         return Device(
             row.id, row.name, row.ip, row.base_url, row.device_type,
-            row.created_at, row.updated_at, row.controller_name,
+            row.created_at, row.updated_at,
         )
 
     def get_by_id(self, device_id: str) -> Device:
@@ -246,7 +215,7 @@ class DeviceRegistry:
             raise SmartWateringError(f"unknown device id: {device_id}")
         return Device(
             row.id, row.name, row.ip, row.base_url, row.device_type,
-            row.created_at, row.updated_at, row.controller_name,
+            row.created_at, row.updated_at,
         )
 
     def is_name_available(self, name: str, current_name: str | None = None) -> bool:
@@ -286,17 +255,6 @@ class DeviceRegistry:
                 session.flush()
             except IntegrityError as exc:
                 raise DeviceNameConflictError(f"device name already exists: {candidate}") from exc
-        return self.get_by_id(device.id)
-
-    def confirm_controller_name(self, device_id: str, controller_name: str) -> Device:
-        device = self.get_by_id(device_id)
-        now = time.time()
-        with self.store.session() as session:
-            row = session.get(DeviceRecord, device.id)
-            if row is None:
-                raise SmartWateringError(f"unknown device id: {device_id}")
-            row.controller_name = controller_name
-            row.updated_at = now
         return self.get_by_id(device.id)
 
     def remove(self, device_id: str) -> None:
@@ -935,17 +893,6 @@ class OperationLog:
             except (json.JSONDecodeError, SmartWateringError) as exc:
                 self.log(
                     f"confirmed config apply skipped operation_id={operation_id} "
-                    f"device={device_name} reason={exc}"
-                )
-        elif operation_type == "controller_name" and status == OP_SUCCESS:
-            try:
-                payload = json.loads(payload_json or "{}")
-                controller_name = payload.get("name") if isinstance(payload, dict) else None
-                if isinstance(controller_name, str):
-                    DeviceRegistry(self.store).confirm_controller_name(device_id, controller_name)
-            except (json.JSONDecodeError, SmartWateringError) as exc:
-                self.log(
-                    f"controller name apply skipped operation_id={operation_id} "
                     f"device={device_name} reason={exc}"
                 )
     def is_cancelled(self, operation_id: str) -> bool:

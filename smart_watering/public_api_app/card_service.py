@@ -351,6 +351,8 @@ class DeviceCardService:
                 "tone": "danger" if water is not None and water < 100 else "accent",
             }
         workflow = self._project_workflow_state(result)
+        runtime_device = result.get("device") or {}
+        mcu_name = runtime_device.get("name")
         raw_connectivity = status.get("status") or "offline"
         connectivity_code = str(getattr(raw_connectivity, "value", raw_connectivity))
         connectivity = {
@@ -364,7 +366,7 @@ class DeviceCardService:
             "required": True,
             "data": {
                 "title": device.name,
-                "subtitle": f"MCU: {device.controller_name}",
+                "subtitle": f"MCU: {mcu_name}" if mcu_name else "MCU: unavailable",
                 "status": {
                     "code": connectivity_code,
                     **connectivity,
@@ -689,12 +691,10 @@ class DeviceCardService:
     def _calculate_block_revision(
         status: dict[str, Any],
         operations: list[dict[str, Any]],
-        operation_watermark: float = 0,
     ) -> int:
         timestamps = [
             status.get("result_received_at") or 0,
             status.get("presence_checked_at") or 0,
-            operation_watermark,
         ]
         timestamps.extend(
             value for operation in operations
