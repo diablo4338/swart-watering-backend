@@ -1,6 +1,7 @@
 ﻿import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -14,6 +15,48 @@ from smart_watering.public_api_app import create_app
 from smart_watering.public_api_app.card_service import DeviceCardService
 from smart_watering.public_api_app.runtime import ApiRuntime, ApiSettings
 from smart_watering.public_api_app.service import DeviceStateProjectionService
+
+
+def test_days_to_zero_uses_average_full_period_rate() -> None:
+    assert DeviceCardService._days_to_zero(277, (-3.0 + -1.0) / 2) == 6
+
+
+def test_days_to_zero_handles_missing_zero_and_exhausted_values() -> None:
+    assert DeviceCardService._days_to_zero(240, None) is None
+    assert DeviceCardService._days_to_zero(240, 0.0) is None
+    assert DeviceCardService._days_to_zero(0, -1.0) == 0
+
+
+def test_plant_overview_contract_projects_days_to_zero() -> None:
+    service = DeviceCardService(SimpleNamespace())
+    service._project_statistics = lambda _device_id: [{
+        "kind": "water_consumption",
+        "days": [],
+        "latest_full_period_rate_g_per_hour": -2.0,
+    }]
+
+    block = service._project_overview_block(
+        SimpleNamespace(id="plant-id", name="Avocado", device_type="plant"),
+        {
+            "available": True,
+            "online": True,
+            "status": "online",
+            "source": "snapshot",
+            "result": {
+                "weight": {"gross_weight_g": 1340},
+                "config": {
+                    "dry_weight_g": 1000,
+                    "wet_weight_g": 1500,
+                    "watering_loss_threshold_percent": 20,
+                },
+            },
+        },
+        include_project_statistics=True,
+    )
+
+    assert block["data"]["primary_value"]["value"] == 240
+    assert block["data"]["primary_value"]["days_to_zero"] == 5
+    assert "latest_full_period_rate_g_per_hour" not in block["data"]["statistics"][0]
 
 
 def make_client(temp_dir: str) -> tuple[TestClient, SmartWateringService]:
@@ -476,6 +519,3 @@ def test_v3_device_resource_id_survives_backend_rename() -> None:
         assert client.get(
             "/api/v3/devices/new-name/card", headers=headers
         ).status_code == 400
-
-
-

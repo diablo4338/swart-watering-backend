@@ -332,14 +332,31 @@ class DeviceCardService:
         statistics: list[dict[str, Any]] = []
         if device.device_type == "plant":
             threshold_weight = self._remaining_weight_above_threshold(weight, config)
+            if include_project_statistics:
+                statistics = self._project_statistics(device.id)
+            full_period_rate = next(
+                (
+                    statistic.get("latest_full_period_rate_g_per_hour")
+                    for statistic in statistics
+                    if statistic.get("kind") == "water_consumption"
+                ),
+                None,
+            )
+            statistics = [
+                {
+                    key: value
+                    for key, value in statistic.items()
+                    if key != "latest_full_period_rate_g_per_hour"
+                }
+                for statistic in statistics
+            ]
             primary_value = {
                 "value": threshold_weight,
                 "unit": "g",
                 "label": "Weight above watering threshold",
                 "tone": "good" if threshold_weight is not None and threshold_weight > 50 else "danger",
+                "days_to_zero": self._days_to_zero(threshold_weight, full_period_rate),
             }
-            if include_project_statistics:
-                statistics = self._project_statistics(device.id)
         else:
             gross = weight.get("gross_weight_g")
             tare = config.get("tare_weight_g")
@@ -671,14 +688,32 @@ class DeviceCardService:
         if cached is not None and cached[0] > now:
             return cached[1]
         try:
+            consumption = self.device_state.project_water_consumption(device_id)
             value = [{
                 "kind": "water_consumption",
-                "days": self.device_state.project_water_consumption(device_id)["days"],
+                "days": consumption["days"],
+                "latest_full_period_rate_g_per_hour": consumption.get(
+                    "latest_full_period_rate_g_per_hour"
+                ),
             }]
         except Exception:
             value = cached[1] if cached is not None else []
         self._project_statistics_cache[device_id] = (now + 300, value)
         return value
+
+    @staticmethod
+    def _days_to_zero(
+        remaining_weight_g: int | None,
+        full_period_rate_g_per_hour: float | None,
+    ) -> int | None:
+        if remaining_weight_g is None or full_period_rate_g_per_hour is None:
+            return None
+        if remaining_weight_g <= 0:
+            return 0
+        daily_consumption_g = abs(full_period_rate_g_per_hour) * 24
+        if daily_consumption_g <= 0:
+            return None
+        return round(remaining_weight_g / daily_consumption_g)
 
     @staticmethod
     def _project_workflow_state(result: dict[str, Any]) -> dict[str, str]:
@@ -760,5 +795,3 @@ class DeviceCardService:
         if not values:
             raise PublicApiError("watering parameters are required", 400, "invalid_watering_parameters")
         return values
-
-

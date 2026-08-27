@@ -325,7 +325,32 @@ class DeviceStateProjectionService:
                         self.consumption_drop_threshold_percent,
                     )
                 )
-        return {"device_id": device.id, "device_name": device.name, "days": list(rows.values())[:7]}
+        completed_by_date: dict[Any, dict[str, float | None]] = {}
+        for end, period_name, value in completed_periods:
+            period_date = (
+                end.date()
+                if period_name == "day"
+                else (end - timedelta(days=1)).date()
+            )
+            completed_by_date.setdefault(period_date, {})[period_name] = value
+        latest_full_period_rate = None
+        full_dates = [
+            period_date
+            for period_date, values in completed_by_date.items()
+            if "day" in values and "night" in values
+        ]
+        if full_dates:
+            latest_values = completed_by_date[max(full_dates)]
+            day_rate = latest_values["day"]
+            night_rate = latest_values["night"]
+            if day_rate is not None and night_rate is not None:
+                latest_full_period_rate = (day_rate + night_rate) / 2
+        return {
+            "device_id": device.id,
+            "device_name": device.name,
+            "days": list(rows.values())[:7],
+            "latest_full_period_rate_g_per_hour": latest_full_period_rate,
+        }
 
     def project_watering_history(
         self, device_id: str, limit: int, offset: int
@@ -387,4 +412,3 @@ class DeviceStateProjectionService:
                 "detected_watering_not_found",
             )
         return {"id": event_id, "fertilized": event["fertilized"]}
-

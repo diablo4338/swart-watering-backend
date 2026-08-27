@@ -205,6 +205,13 @@ GET /api/v3/devices
 
 ### 2. Card manifest
 
+For plant cards, `primary_value.days_to_zero` is the whole number of forecast days
+before the displayed value reaches zero. The backend uses the most recent fully
+completed day-and-night pair, averages their consumption rates, multiplies the
+absolute rate by 24, and rounds the primary value divided by that daily consumption
+to the nearest whole day. The field is `null` when the latest full pair has missing
+or zero consumption data.
+
 ```http
 GET /api/v3/devices/avocado/card
 ```
@@ -226,7 +233,7 @@ The response describes ordered blocks and returns enough initial data to render 
         "title": "Avocado",
         "status": {"code": "online", "label": "Online", "severity": "success"},
         "workflow": {"code": "idle", "label": "Idle", "severity": "success"},
-        "primary_value": {"value": 1240, "unit": "g", "label": "Weight"},
+        "primary_value": {"value": 1240, "unit": "g", "label": "Weight", "days_to_zero": 12},
         "snapshot_at": "2026-08-24T12:00:00Z",
         "statistics": []
       },
