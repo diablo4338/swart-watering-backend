@@ -76,7 +76,8 @@ to `watering`; overview workflow is derived only from the snapshot and is theref
 either `idle` or `watering`. Queued and applying commands are represented only by
 the operation queue. Snapshot tasks never appear in that queue. The overview projection
 includes `snapshot_at` when the MCU is offline and displayed values come from a
-stored snapshot.
+stored snapshot. Android keeps those values visible but renders a client-side error
+when `snapshot_at` is more than 24 hours older than the current time.
 
 ## Goal
 
