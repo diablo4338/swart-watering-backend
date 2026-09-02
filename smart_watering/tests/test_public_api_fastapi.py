@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 import yaml
 
 from smart_watering.application.service import SmartWateringService
-from smart_watering.domain import SmartWateringError
+from smart_watering.domain import DeviceApiClient, SmartWateringError
 from smart_watering.infrastructure.database import DatabaseError
 from smart_watering.public_api_app import create_app
 from smart_watering.public_api_app.card_service import DeviceCardService
@@ -79,16 +79,17 @@ def test_android_release_metadata_and_download_are_public() -> None:
         releases_dir = Path(temp_dir) / "releases"
         version_dir = releases_dir / "1001"
         version_dir.mkdir(parents=True)
+        apk_filename = "smart-watering-1.0.0-1001.apk"
         manifest = {
             "version_name": "1.0.0",
             "version_code": 1001,
-            "filename": "smart-watering-1.0.0-1001.apk",
+            "filename": apk_filename,
             "sha256": "abc",
             "size": 3,
             "published_at": "2026-08-04T00:00:00Z",
             "git_commit": "deadbeef",
         }
-        (version_dir / manifest["filename"]).write_bytes(b"apk")
+        (version_dir / apk_filename).write_bytes(b"apk")
         (version_dir / "manifest.json").write_text(
             json.dumps(manifest), encoding="utf-8"
         )
@@ -97,23 +98,31 @@ def test_android_release_metadata_and_download_are_public() -> None:
         )
         client, _cli = make_client(temp_dir)
 
-        latest = client.get("/api/v2/app/latest")
-        download = client.get("/api/v2/app/releases/1001/download")
+        latest = client.get("/api/v3/app/latest")
+        download = client.get("/api/v3/app/releases/1001/download")
 
         assert latest.status_code == 200
         assert latest.json()["version_code"] == 1001
         assert latest.json()["download_url"].endswith(
-            "/api/v2/app/releases/1001/download"
+            "/api/v3/app/releases/1001/download"
         )
         assert download.status_code == 200
         assert download.content == b"apk"
+
+        legacy_latest = client.get("/api/v2/app/latest")
+        legacy_download = client.get("/api/v2/app/releases/1001/download")
+        assert legacy_latest.status_code == 200
+        assert legacy_latest.json()["download_url"].endswith(
+            "/api/v2/app/releases/1001/download"
+        )
+        assert legacy_download.content == b"apk"
 
 
 def test_android_release_returns_not_found_before_first_publication() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         client, _cli = make_client(temp_dir)
 
-        response = client.get("/api/v2/app/latest")
+        response = client.get("/api/v3/app/latest")
 
         assert response.status_code == 404
         assert response.json()["error"] == {
@@ -179,15 +188,18 @@ def test_database_errors_return_safe_service_unavailable_response() -> None:
         assert "SELECT secret" not in response.text
 
 
-def test_only_android_release_routes_remain_on_v2() -> None:
+def test_android_release_routes_have_v3_replacements_and_deprecated_v2_aliases() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         client, _cli = make_client(temp_dir)
         paths = client.get("/openapi.json").json()["paths"]
 
-        assert {path for path in paths if path.startswith("/api/v2/")} == {
+        v2_paths = {
             "/api/v2/app/latest",
             "/api/v2/app/releases/{version_code}/download",
         }
+        assert {path for path in paths if path.startswith("/api/v2/")} == v2_paths
+        assert {path.replace("/api/v2/", "/api/v3/") for path in v2_paths} <= paths.keys()
+        assert all(paths[path]["get"]["deprecated"] is True for path in v2_paths)
         assert "/api/v3/auth/login" in paths
         assert "/api/v3/auth/google" in paths
         assert "/api/v3/auth/logout" in paths
@@ -227,7 +239,7 @@ def test_v3_device_card_exposes_server_driven_blocks_and_actions() -> None:
                 side_effect=AssertionError("initial card must not load history"),
             ),
             patch.object(
-                cli.api,
+                DeviceApiClient,
                 "request_json",
                 side_effect=AssertionError("card projection must not contact the MCU"),
             ),
@@ -390,7 +402,7 @@ def test_v3_device_card_exposes_server_driven_blocks_and_actions() -> None:
             },
             "weight": {"gross_weight_g": 1300},
         }
-        with patch.object(cli.api, "request_json", return_value=manual_snapshot) as request:
+        with patch.object(DeviceApiClient, "request_json", return_value=manual_snapshot) as request:
             refreshed = client.post(
                 f"/api/v3/devices/{device_id}/actions/refresh-card",
                 json={},
@@ -413,7 +425,7 @@ def test_v3_device_card_exposes_server_driven_blocks_and_actions() -> None:
         assert cli.operations.list_recent(device_id=device_id) == []
 
         with patch.object(
-            cli.api,
+            DeviceApiClient,
             "request_json",
             side_effect=SmartWateringError("device unavailable"),
         ):

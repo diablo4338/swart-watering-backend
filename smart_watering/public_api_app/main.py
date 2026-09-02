@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from functools import partial
 from time import perf_counter
 
 from fastapi import FastAPI, Request
@@ -38,7 +39,8 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
         started_at = perf_counter()
         response = await call_next(request)
         elapsed_ms = (perf_counter() - started_at) * 1000
-        client = request.client.host if request.client else "-"
+        client_address = request.client
+        client = client_address.host if client_address is not None else "-"
         print(
             f'{client} "{request.method} {request.url.path}" '
             f"{response.status_code} {elapsed_ms:.1f}ms",
@@ -92,9 +94,13 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
                 status_code=404,
                 content=error_payload("not_found", "not found"),
             )
+        detail = exc.detail
         return JSONResponse(
             status_code=exc.status_code,
-            content=error_payload("http_error", str(exc.detail)),
+            content=error_payload(
+                "http_error",
+                detail if isinstance(detail, str) else "HTTP error",
+            ),
         )
 
     @app.get("/healthz", tags=["system"])
@@ -103,6 +109,11 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
 
     app.include_router(auth.router)
     app.include_router(app_releases.router)
+    app.include_router(app_releases.legacy_router)
     app.include_router(cards.router)
-    app.add_middleware(IdempotencyMiddleware, store=runtime.business.store)
+    idempotency_middleware = partial(
+        IdempotencyMiddleware,
+        store=runtime.business.store,
+    )
+    app.add_middleware(idempotency_middleware)
     return app

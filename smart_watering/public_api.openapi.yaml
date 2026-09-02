@@ -95,12 +95,12 @@ paths:
                 title: Response Logout Api V3 Auth Logout Post
       security:
       - HTTPBearer: []
-  /api/v2/app/latest:
+  /api/v3/app/latest:
     get:
       tags:
       - app
       summary: Latest Release
-      operationId: latest_release_api_v2_app_latest_get
+      operationId: latest_release_api_v3_app_latest_get
       responses:
         '200':
           description: Successful Response
@@ -109,13 +109,55 @@ paths:
               schema:
                 additionalProperties: true
                 type: object
-                title: Response Latest Release Api V2 App Latest Get
-  /api/v2/app/releases/{version_code}/download:
+                title: Response Latest Release Api V3 App Latest Get
+  /api/v3/app/releases/{version_code}/download:
     get:
       tags:
       - app
       summary: Download Release
-      operationId: download_release_api_v2_app_releases__version_code__download_get
+      operationId: download_release_api_v3_app_releases__version_code__download_get
+      parameters:
+      - name: version_code
+        in: path
+        required: true
+        schema:
+          type: integer
+          title: Version Code
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v2/app/latest:
+    get:
+      tags:
+      - app
+      summary: Legacy Latest Release
+      operationId: legacy_latest_release_api_v2_app_latest_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Legacy Latest Release Api V2 App Latest Get
+      deprecated: true
+  /api/v2/app/releases/{version_code}/download:
+    get:
+      tags:
+      - app
+      summary: Legacy Download Release
+      operationId: legacy_download_release_api_v2_app_releases__version_code__download_get
+      deprecated: true
       parameters:
       - name: version_code
         in: path

@@ -21,7 +21,7 @@ Status: v3 baseline implemented; breaking changes are allowed.
 - In the plant profile, the operation queue is rendered after the expandable history/control content and before overview statistics.
 - Android has no operation models, operation endpoints, status interpretation, recovery loop, or operation polling.
 - Overview statistics are cached server-side for five minutes; per-block polling does not reload history.
-- `/healthz` and `/api/v2/app/...` release metadata/download routes remain compatible.
+- `/healthz` and `/api/v3/app/...` expose release metadata/downloads; equivalent v2 release routes remain as deprecated compatibility aliases.
 - No device, operation, or authentication endpoints remain under v2.
 
 The current implementation uses block polling. ETag support, streaming, and persistent

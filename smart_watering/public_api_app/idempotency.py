@@ -5,8 +5,9 @@ from threading import Lock
 from fastapi import Request
 from sqlalchemy import delete
 from starlette.responses import JSONResponse, Response
+from starlette.types import ASGIApp
 
-from smart_watering.infrastructure.database import IdempotencyRecord
+from smart_watering.infrastructure.database import DatabaseStore, IdempotencyRecord
 
 
 IDEMPOTENT_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
@@ -16,7 +17,7 @@ RECORD_TTL_SEC = 24 * 60 * 60
 
 
 class IdempotencyMiddleware:
-    def __init__(self, app, store) -> None:
+    def __init__(self, app: ASGIApp, store: DatabaseStore) -> None:
         self.app = app
         self.store = store
         self.lock = Lock()

@@ -82,7 +82,7 @@ Android build configuration:
 
 | Variable | Default | Used by | Description |
 | --- | --- | --- | --- |
-| `SMART_WATERING_PUBLIC_API_BASE_URL` | `https://api.example.com/` | Android Gradle build | Public API server root URL embedded into the app. Do not include `/api/v2`; app paths already include it. |
+| `SMART_WATERING_PUBLIC_API_BASE_URL` | `https://api.example.com/` | Android Gradle build | Public API server root URL embedded into the app. Do not include `/api/v3`; app paths already include it. |
 | `SMART_WATERING_PUBLIC_API_URL` | fallback alias for base URL | Android Gradle build, smoke test | Legacy/fallback public API root URL. The smoke test requires this exact key. |
 | `SMART_WATERING_PUBLIC_API_BASE_URL_DEBUG` | none | Android Gradle build | Debug-build override for `SMART_WATERING_PUBLIC_API_BASE_URL`. |
 | `SMART_WATERING_PUBLIC_API_BASE_URL_RELEASE` | none | Android Gradle build | Release-build override for `SMART_WATERING_PUBLIC_API_BASE_URL`. |
@@ -168,8 +168,8 @@ versioned directory and atomically replaces `latest.json` in
 `SMART_WATERING_ANDROID_RELEASES_DIR`. The public API mounts that host directory
 read-only and exposes:
 
-- `GET /api/v2/app/latest` — current version metadata and download URL;
-- `GET /api/v2/app/releases/{version_code}/download` — the signed APK.
+- `GET /api/v3/app/latest` — current version metadata and download URL;
+- `GET /api/v3/app/releases/{version_code}/download` — the signed APK.
 
 Because the runner, backend and Prometheus are on one machine, configure the same
 absolute directory (for example `/srv/smart-watering/releases`) as both the Android

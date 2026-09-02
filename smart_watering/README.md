@@ -235,10 +235,10 @@ The mobile client uses `/api/v3/auth/...` and the server-driven `/api/v3/devices
 card contract. Device controls and operation queues are projected as card blocks and
 advertised actions; the client does not call operation-oriented routes.
 
-Only Android update compatibility remains under v2:
+Android update routes are available under v3:
 
-- `GET /api/v2/app/latest`
-- `GET /api/v2/app/releases/{version_code}/download`
+- `GET /api/v3/app/latest`
+- `GET /api/v3/app/releases/{version_code}/download`
 
 All protected `/api/v3/*` endpoints require a JWT bearer token signed with `HS256`.
 Users and active sessions are stored in SQLite.
@@ -279,12 +279,12 @@ GET  /api/v3/devices
 GET  /api/v3/devices/<device>/card
 GET  /api/v3/devices/<device>/card/blocks/<block>
 POST /api/v3/devices/<device>/actions/<action>
-GET  /api/v2/app/latest
-GET  /api/v2/app/releases/<version_code>/download
+GET  /api/v3/app/latest
+GET  /api/v3/app/releases/<version_code>/download
 ```
 
-Only the two Android release routes remain under v2. See `PUBLIC_API.md` and
-`public_api.openapi.yaml` for the current contract.
+The two equivalent Android release routes under v2 are deprecated compatibility
+aliases. See `PUBLIC_API.md` and `public_api.openapi.yaml` for the current contract.
 
 ## Docker Nodes
 

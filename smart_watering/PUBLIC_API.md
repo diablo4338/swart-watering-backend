@@ -13,8 +13,10 @@ whenever a route signature changes.
 ## Public routes
 
 - `GET /healthz`
-- `GET /api/v2/app/latest`
-- `GET /api/v2/app/releases/{version_code}/download`
+- `GET /api/v3/app/latest`
+- `GET /api/v3/app/releases/{version_code}/download`
+
+The equivalent `/api/v2/app/...` release routes are deprecated compatibility aliases.
 
 The two v2 application-release routes intentionally remain compatible so installed
 legacy Android clients can discover and download a current APK. No other v2 route
