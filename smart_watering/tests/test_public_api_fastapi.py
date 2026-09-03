@@ -109,15 +109,6 @@ def test_android_release_metadata_and_download_are_public() -> None:
         assert download.status_code == 200
         assert download.content == b"apk"
 
-        legacy_latest = client.get("/api/v2/app/latest")
-        legacy_download = client.get("/api/v2/app/releases/1001/download")
-        assert legacy_latest.status_code == 200
-        assert legacy_latest.json()["download_url"].endswith(
-            "/api/v2/app/releases/1001/download"
-        )
-        assert legacy_download.content == b"apk"
-
-
 def test_android_release_returns_not_found_before_first_publication() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         client, _cli = make_client(temp_dir)
@@ -188,23 +179,17 @@ def test_database_errors_return_safe_service_unavailable_response() -> None:
         assert "SELECT secret" not in response.text
 
 
-def test_android_release_routes_have_v3_replacements_and_deprecated_v2_aliases() -> None:
+def test_only_v3_api_routes_are_registered() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         client, _cli = make_client(temp_dir)
         paths = client.get("/openapi.json").json()["paths"]
 
-        v2_paths = {
-            "/api/v2/app/latest",
-            "/api/v2/app/releases/{version_code}/download",
-        }
-        assert {path for path in paths if path.startswith("/api/v2/")} == v2_paths
-        assert {path.replace("/api/v2/", "/api/v3/") for path in v2_paths} <= paths.keys()
-        assert all(paths[path]["get"]["deprecated"] is True for path in v2_paths)
+        assert not {path for path in paths if path.startswith("/api/v2/")}
+        assert "/api/v3/app/latest" in paths
+        assert "/api/v3/app/releases/{version_code}/download" in paths
         assert "/api/v3/auth/login" in paths
         assert "/api/v3/auth/google" in paths
         assert "/api/v3/auth/logout" in paths
-        assert client.post("/api/v2/auth/login", json={}).status_code == 404
-        assert client.get("/api/v2/devices").status_code == 404
 
 
 def test_checked_in_openapi_matches_registered_routes() -> None:

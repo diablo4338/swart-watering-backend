@@ -3127,24 +3127,6 @@ def test_public_api_requires_bearer_token() -> None:
         assert public_api_response_body(handler)["error"]["code"] == "missing_token"
 
 
-def test_public_api_does_not_expose_device_health() -> None:
-    class HealthApi:
-        def request_text(self, base_url, path, method, payload=None):
-            raise AssertionError("health endpoint should not call device API")
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
-        app.registry.add("192.168.1.50", "plant", "plant_1")
-        app.api = HealthApi()
-        token = make_public_api_token(app)
-        handler = make_public_api_handler("GET", "/api/v2/devices/plant_1/health", app, token)
-
-        handler.do_GET()
-
-        assert handler.responses == [404]
-        assert public_api_response_body(handler)["error"]["code"] == "not_found"
-
-
 def test_public_api_status_latest_returns_none_without_snapshot_without_live_request() -> None:
     class UnexpectedLiveStatusApi:
         def __init__(self) -> None:

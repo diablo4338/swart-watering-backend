@@ -283,8 +283,8 @@ GET  /api/v3/app/latest
 GET  /api/v3/app/releases/<version_code>/download
 ```
 
-The two equivalent Android release routes under v2 are deprecated compatibility
-aliases. See `PUBLIC_API.md` and `public_api.openapi.yaml` for the current contract.
+No v2 routes are registered. See `PUBLIC_API.md` and `public_api.openapi.yaml` for
+the current contract.
 
 ## Docker Nodes
 

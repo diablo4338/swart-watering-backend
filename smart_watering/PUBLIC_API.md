@@ -16,11 +16,7 @@ whenever a route signature changes.
 - `GET /api/v3/app/latest`
 - `GET /api/v3/app/releases/{version_code}/download`
 
-The equivalent `/api/v2/app/...` release routes are deprecated compatibility aliases.
-
-The two v2 application-release routes intentionally remain compatible so installed
-legacy Android clients can discover and download a current APK. No other v2 route
-is registered.
+No v2 routes are registered.
 
 ## Authentication
 

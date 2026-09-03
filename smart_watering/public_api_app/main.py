@@ -109,7 +109,6 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
 
     app.include_router(auth.router)
     app.include_router(app_releases.router)
-    app.include_router(app_releases.legacy_router)
     app.include_router(cards.router)
     idempotency_middleware = partial(
         IdempotencyMiddleware,

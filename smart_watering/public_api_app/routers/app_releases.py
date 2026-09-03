@@ -10,7 +10,6 @@ from ..runtime import ApiRuntime
 
 
 router = APIRouter(prefix="/api/v3/app", tags=["app"])
-legacy_router = APIRouter(prefix="/api/v2/app", tags=["app"])
 
 
 def runtime(request: Request) -> ApiRuntime:
@@ -51,13 +50,12 @@ def _manifest(releases_dir: Path, version_code: int | None = None) -> dict[str, 
 def _latest_release(
     request: Request,
     app_runtime: ApiRuntime,
-    download_route_name: str,
 ) -> dict[str, Any]:
     payload = _manifest(app_runtime.settings.android_releases_dir)
     version_code = payload["version_code"]
     return {
         **payload,
-        "download_url": str(request.url_for(download_route_name, version_code=version_code)),
+        "download_url": str(request.url_for("download_release", version_code=version_code)),
     }
 
 
@@ -66,15 +64,7 @@ def latest_release(
     request: Request,
     app_runtime: Annotated[ApiRuntime, Depends(runtime)],
 ) -> dict[str, Any]:
-    return _latest_release(request, app_runtime, "download_release")
-
-
-@legacy_router.get("/latest", deprecated=True)
-def legacy_latest_release(
-    request: Request,
-    app_runtime: Annotated[ApiRuntime, Depends(runtime)],
-) -> dict[str, Any]:
-    return _latest_release(request, app_runtime, "legacy_download_release")
+    return _latest_release(request, app_runtime)
 
 
 def _download_release(
@@ -96,18 +86,6 @@ def _download_release(
 
 @router.get("/releases/{version_code}/download", name="download_release")
 def download_release(
-    version_code: int,
-    app_runtime: Annotated[ApiRuntime, Depends(runtime)],
-) -> FileResponse:
-    return _download_release(version_code, app_runtime)
-
-
-@legacy_router.get(
-    "/releases/{version_code}/download",
-    name="legacy_download_release",
-    deprecated=True,
-)
-def legacy_download_release(
     version_code: int,
     app_runtime: Annotated[ApiRuntime, Depends(runtime)],
 ) -> FileResponse:
