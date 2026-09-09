@@ -1009,7 +1009,7 @@ class SmartWateringCliApp(SmartWateringService):
         if days <= 0:
             raise SmartWateringError("days must be > 0")
         detector = PlantWateringDetector(
-            self,
+            self.store,
             os.environ.get(PROMETHEUS_URL_ENV, DEFAULT_PROMETHEUS_URL),
         )
         end = datetime.now(timezone.utc)

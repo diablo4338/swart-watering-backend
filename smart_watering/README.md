@@ -291,10 +291,9 @@ the current contract.
 Compose starts the Python nodes as separate services:
 
 - `smart-watering` - callback node on host port `8080`.
-- `worker` - queue worker.
+- `worker` - queue worker with a periodic statistics scheduler (hourly, previous three hours).
 - `snapshotter` - periodic status snapshot enqueue process.
 - `public-api` - public API on host port `8081`.
-- `watering-detector` - periodic watering detection process.
 - `cli` - idle management container available through the Portainer console.
 
 Setup:

@@ -152,6 +152,12 @@ class DeviceCardService:
             )
         elif action == "stop-watering":
             self.business.queue_stop(device.id)
+        elif action == "collect-statistics":
+            if payload:
+                raise PublicApiError("collect-statistics does not accept fields", 400, "invalid_payload")
+            if device.device_type != "plant":
+                raise PublicApiError("statistics collection requires a plant", 400, "invalid_device_type")
+            self.business.queue_statistics_collection(device.id)
         elif action == "refresh-card":
             try:
                 self.business.request_device_status_snapshot(device.id)
@@ -595,9 +601,16 @@ class DeviceCardService:
         return {
             "id": "watering_history", "kind": "history", "slot": "history",
             "title": "Watering history", "required": False,
+            "schema": {"controls": [{
+                "kind": "action", "id": "collect_statistics", "label": "Collect statistics",
+                "control_type": "button.v1", "enabled": True,
+                "request": self._advertised_action_request(
+                    f"/api/v3/devices/{device.id}/actions/collect-statistics"
+                ),
+            }]},
             "data": {"items": items, "next_offset": history["next_offset"]},
             "refresh": {
-                "mode": "once",
+                "mode": "on_open",
                 "href": f"/api/v3/devices/{device.id}/card/blocks/watering_history",
             },
         }

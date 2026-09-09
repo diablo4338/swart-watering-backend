@@ -81,16 +81,60 @@ when `snapshot_at` is more than 24 hours older than the current time.
 
 ## Goal
 
-The Android client asks for a device and its card. It does not inspect operation queues, infer workflow state, recover running operations, or know backend operation status names. The backend exposes a ready-to-render semantic read model and owns all device state machines.
+The Android client asks for a device and its card. The backend owns all device state
+machines and operation recovery. Android renders described controls without interpreting operation types or statuses.
 
 The design is deliberately split between:
 
 - a native client layout for each known card profile (`plant`, `tank`, and future profiles);
 - server-driven blocks, fields, values, actions, links, and refresh policies inside that layout.
 
-The client is not a generic browser for arbitrary server-defined UI. It supports a versioned vocabulary of block and field types and fails safely when it receives an unsupported required component.
+The client renders a fixed vocabulary of block and control types. Unknown required
+block kinds show an update-required message. Control fallback behavior is described
+under Failure handling and implementation limits.
 
 ## Responsibility boundary
+
+### Manual history refresh
+
+History exposes a plain `button.v1` in `schema.controls`, including when empty.
+Its advertised `collect-statistics` action uses a `none` body binding. Pressing it
+queues a scan of the previous 30 days; Android does not track the operation.
+History reads stored events and reloads on opening. Overview statistics keep their
+normal five-minute cache lifetime.
+
+The path is `DeviceCardService.execute_action` →
+`SmartWateringService.queue_statistics_collection` → shared `_enqueue` → `OperationLog.create` / `CommandQueue.enqueue` →
+`BackgroundWorker._collect_statistics` → `PlantWateringDetector.scan_device`.
+The detector reads Prometheus and upserts history through the existing repositories.
+The queued command stores `device_id` and its fixed UTC period. The worker selects
+the history handler by the persisted operation type `statistics_collection`, not
+by the command's HTTP method or path. It performs no MCU HTTP delivery for this type.
+Queue rows retain the ordinary `POST` default; transport fields are unused by the
+history handler. MCU callback timeout checks likewise use the operation type.
+There is no separate backend-operation dispatcher or operation-aware UI component.
+
+Requests use the ordinary operation creation and command queue flow, including
+the existing exact-command duplicate check. New presses normally create new commands
+because each request captures its own current UTC end time. There is no
+history-specific merging, period comparison, priority, or active-operation reuse.
+History commands for the same device execute in queue order; other devices have
+independent workers. Existing MCU command retries may move those commands to the tail.
+
+The existing worker owns success, errors, deadlines, cancellation and recovery.
+After a worker restart, a non-terminal history command scans its saved period again
+if its deadline has not expired; it does not resume from a checkpoint. Terminal
+history commands are removed without another scan. Local scans do not wait for MCU
+callbacks. Cancellation during a scan does not interrupt it or roll back saved events.
+Prometheus requests use a ten-second HTTP timeout. The worker checks elapsed time
+before and after scanning; its deadline is not a hard interrupt of a running scan.
+The button's HTTP response confirms enqueueing, not completion. Updated history is
+read when the block is reopened; the button does not poll for completion.
+
+Automatic collection is scheduled in `jobs/worker.py`: on startup and hourly it
+queues a three-hour scan for each plant. `SMART_WATERING_DETECTOR_INTERVAL_SEC` and
+`SMART_WATERING_DETECTOR_LOOKBACK_HOURS` configure it. This uses the same queue and
+worker as the manual button, with no separate container.
 
 ### Device registration safety boundary
 
@@ -115,11 +159,11 @@ MCU-confirmed patch to that snapshot, it is visible only in `operation_queue`.
 
 | Block | Allowed data sources | Explicitly forbidden |
 | --- | --- | --- |
-| `overview` | latest stored MCU snapshot; binary runtime presence for connectivity; cached statistics for the statistics section; registry identity for title/subtitle | operation records and direct MCU reads |
+| `overview` | latest stored MCU snapshot; binary runtime presence for connectivity; cached statistics for the statistics section; registry identity for the title | operation records and direct MCU reads |
 | `control` | latest stored MCU snapshot, including MCU-confirmed callback patches; registry identity for the backend name and device fallback metadata | operation records, queue state, and direct MCU reads |
 | `watering_parameters` | latest stored MCU snapshot | registry watering-setting overrides, operation records, queue state, and direct MCU reads |
 | `operation_queue` | active user-visible operation records | MCU snapshots, presence, statistics, history, and direct MCU reads |
-| `watering_history` | stored watering history/events | MCU snapshots, presence, operation queue, and direct MCU reads |
+| `watering_history` | stored watering history/events | MCU snapshots, presence, operation records, and direct MCU reads |
 | tank `watering` | latest stored MCU snapshot and the relevant active watering operation | unrelated operation types and direct MCU reads |
 
 The tank `watering` block is the intentional exception to single-source projection:
@@ -128,12 +172,9 @@ the current watering command. The full-card endpoint may load the union of sourc
 needed by its blocks, but every block builder receives only the sources allowed by
 this table. A per-block endpoint loads only that block's allowed sources.
 
-Every independently fetched block response has its own `block_revision`. There is
-no card-wide revision and revisions from different blocks are never compared. A
-revision is calculated directly from the timestamps of that block's declared sources;
-there is no separately persisted watermark state. Overview includes the latest
-presence probe timestamp, while operation queue uses the updates of the operations it
-actually projects.
+Each block response has a separate `block_revision`. History and operation queue
+use response creation time; snapshot-backed blocks use source timestamps. Revisions
+from different blocks are never compared. See Refresh and revisions below.
 
 ### Backend naming
 
@@ -159,7 +200,7 @@ cards and blocks. Runtime wiring exposes them as `device_state` and `cards`.
 - field definitions, validation constraints, defaults, and current values;
 - block data sources and submission targets;
 - refresh policy for each block;
-- a monotonically increasing card or block revision.
+- per-block revisions for ordering responses.
 
 ### Client owns
 
@@ -170,7 +211,7 @@ cards and blocks. Runtime wiring exposes them as `device_state` and `cards`.
 - scheduling refreshes only while the relevant card/block is visible;
 - stopping refreshes when the lifecycle owner is not active.
 
-The client must not contain `isFinalOperationStatus`, operation-type filters, operation recovery loops, or per-command workflow logic.
+The client must not interpret operation statuses or filter operation types. No component owns operation recovery or per-command workflows.
 
 `action_toggle.v1` owns generic optimistic interaction behavior. After a tap it
 shows the requested value immediately, disables itself for at least the containing
@@ -180,408 +221,132 @@ after both the guard interval and a successful response; a failed response resto
 the previous value and shows the request error. This behavior is tied to the stable
 control type, not to a block id or operation type.
 
-## API shape
+## Current card contract
 
-### 1. Device discovery
+`GET /api/v3/devices` returns database IDs, display names, `card_profile`, and
+`card_href`. IDs in URLs are `devices.id`, never display names.
+`GET /api/v3/devices/{device_id}/card` returns `device_id`, `profile`,
+`schema_version`, and ordered `blocks`. Closed history is initially a descriptor;
+its contents and button are loaded when the block opens.
 
-```http
-GET /api/v3/devices
-```
+A block has `id`, `kind`, `slot`, `required`, `refresh`, and optional `title`,
+`schema`, `data`, and `actions`. Android's existing `CardBlockRenderer` supports
+`device_overview`, `dynamic_form`, `history`, `operation_queue`, `progress`, and
+`message`. Plant cards contain overview, control, watering parameters, history,
+and operation queue. Tank cards use the `watering` block, rendered as a form or
+progress block according to the backend projection.
 
-```json
-{
-  "devices": [
-    {
-      "id": "avocado",
-      "name": "Avocado",
-      "device_type": "plant",
-      "card_profile": "plant.v1",
-      "card_href": "/api/v3/devices/avocado/card"
-    }
-  ]
-}
-```
+### History button: existing control, no new component
 
-`card_profile` selects a native layout known to the client. `card_href` is opaque to feature code and is followed by the generic API layer.
+Manual history refresh reuses the existing `button.v1` branch of `ActionControl`.
+`HistoryBlock` renders the server's `schema.controls` before history rows. The
+button submits an empty body through the same action executor as other buttons.
+It has no operation type, operation state, completion subscription, or restoration
+logic. Its normal pending indicator lasts only for the action HTTP request.
 
-### 2. Card manifest
-
-For plant cards, `primary_value.days_to_zero` is the whole number of forecast days
-before the displayed value reaches zero. The backend uses the most recent fully
-completed day-and-night pair, averages their consumption rates, multiplies the
-absolute rate by 24, and rounds the primary value divided by that daily consumption
-to the nearest whole day. The field is `null` when the latest full pair has missing
-or zero consumption data.
-
-```http
-GET /api/v3/devices/avocado/card
-```
-
-The response describes ordered blocks and returns enough initial data to render without an N+1 request burst:
+Example of the actual button descriptor within a loaded history block:
 
 ```json
 {
-  "device_id": "550e8400-e29b-41d4-a716-446655440000",
-  "profile": "plant.v1",
-  "schema_version": 1,
-  "blocks": [
-    {
-      "id": "overview",
-      "kind": "device_overview",
-      "slot": "primary",
-      "required": true,
-      "data": {
-        "title": "Avocado",
-        "status": {"code": "online", "label": "Online", "severity": "success"},
-        "workflow": {"code": "idle", "label": "Idle", "severity": "success"},
-        "primary_value": {"value": 1240, "unit": "g", "label": "Weight", "days_to_zero": 12},
-        "snapshot_at": "2026-08-24T12:00:00Z",
-        "statistics": []
-      },
-      "actions": [
-        {
-          "kind": "action",
-          "id": "refresh_card",
-          "label": "Refresh card",
-          "control_type": "button.v1",
-          "enabled": true,
-          "request": {
-            "method": "POST",
-            "href": "/api/v3/devices/550e8400-e29b-41d4-a716-446655440000/actions/refresh-card",
-            "body": {"binding": "none"}
-          }
-        }
-      ],
-      "refresh": {
-        "mode": "poll",
-        "interval_ms": 5000,
-        "href": "/api/v3/devices/550e8400-e29b-41d4-a716-446655440000/card/blocks/overview",
-        "etag": "overview-184"
-      }
-    },
-    {
-      "id": "control",
-      "kind": "dynamic_form",
-      "slot": "control",
-      "required": true,
-      "schema": {},
-      "data": {},
-      "refresh": {
-        "mode": "on_open",
-        "href": "/api/v3/devices/550e8400-e29b-41d4-a716-446655440000/card/blocks/control"
-      }
-    },
-    {
-      "id": "watering_parameters",
-      "kind": "dynamic_form",
-      "slot": "watering_parameters",
-      "required": true,
-      "schema": {},
-      "data": {},
-      "refresh": {
-        "mode": "on_open",
-        "href": "/api/v3/devices/550e8400-e29b-41d4-a716-446655440000/card/blocks/watering_parameters"
-      }
-    },
-    {
-      "id": "watering_history",
-      "kind": "history",
-      "slot": "history",
-      "required": false,
-      "data": {},
-      "refresh": {
-        "mode": "once",
-        "href": "/api/v3/devices/550e8400-e29b-41d4-a716-446655440000/card/blocks/watering_history"
-      }
-    }
-  ]
-}
-```
-
-The initial card response contains the live summary plus the schemas and descriptors
-of closed blocks. Data for `on_open` and `once` blocks is deliberately empty and is
-loaded from `refresh.href` only when the user opens the block. A `once` block is
-loaded once per client session; an `on_open` block is reloaded on every opening.
-Polling is active only for always-visible blocks and for the currently open block.
-Each block endpoint loads only the backend projections required by that block. In
-particular, `operation_queue` must not load the device snapshot, and lightweight
-operation projections must not load event histories that are not rendered.
-
-## Block model
-
-Every block has:
-
-- `id`: stable identifier within a card;
-- `kind`: semantic renderer type understood by the client;
-- `slot`: placement in the native profile layout;
-- `required`: whether lack of client support makes the card incompatible;
-- optional `schema`: form or table definition;
-- optional `data`: current read model;
-- optional `actions`: currently available affordances;
-- `refresh`: lifecycle and caching policy.
-
-Initial block kinds:
-
-- `device_overview`: name, connectivity, primary value, data timestamp, and statistics;
-- `dynamic_form`: control and parameter forms;
-- `history`: paginated watering history;
-- `operation_queue`: active backend operations for one device, each with its own advertised cancel action;
-- `message`: warnings and errors that do not belong to a form;
-- `progress`: a long-running device workflow rendered from backend state.
-
-Control and watering parameters are separate block instances but may share the `dynamic_form` renderer.
-
-## Dynamic form schema
-
-Example control block:
-
-```json
-{
-  "id": "control",
-  "kind": "dynamic_form",
-  "slot": "control",
-  "title": "Control",
-  "schema": {
-    "controls": [
-      {
-        "kind": "field",
-        "id": "target_g",
-        "label": "Target amount",
-        "control_type": "number_input.v1",
-        "value_type": "decimal",
-        "default": 100,
-        "constraints": {"min": 1, "max": 1000, "step": 1},
-        "unit": "g"
-      },
-      {
-        "kind": "field",
-        "id": "mode",
-        "label": "Mode",
-        "control_type": "select.v1",
-        "value_type": "string",
-        "default": "normal",
-        "options": [
-          {"value": "normal", "label": "Normal"},
-          {"value": "slow", "label": "Slow"}
-        ]
-      },
-      {
-        "kind": "action",
-        "id": "sleep_enabled",
-        "label": "Sleep mode",
-        "control_type": "action_toggle.v1",
-        "value_type": "boolean",
-        "enabled": true,
-        "request": {
-          "method": "POST",
-          "href": "/api/v3/devices/avocado/actions/set-sleep",
-          "body": {
-            "binding": "control_value",
-            "property": "enabled"
-          }
-        }
-      },
-      {
-        "kind": "field",
-        "id": "sleep_interval_minutes",
-        "label": "Sleep interval",
-        "control_type": "number_input.v1",
-        "value_type": "integer",
-        "default": 30,
-        "constraints": {"min": 1, "max": 1440},
-        "unit": "min",
-        "commit": {
-          "mode": "button",
-          "label": "Set interval",
-          "request": {
-            "method": "POST",
-            "href": "/api/v3/devices/avocado/actions/set-sleep-interval",
-            "body": {
-              "binding": "control_value",
-              "property": "minutes"
-            }
-          }
-        }
-      },
-      {
-        "kind": "action",
-        "id": "capture_zero",
-        "label": "Capture zero",
-        "control_type": "hold_action.v1",
-        "preset": "zero_capture_hold.v1",
-        "enabled": true,
-        "request": {
-          "method": "POST",
-          "href": "/api/v3/devices/avocado/actions/capture-zero",
-          "body": {"binding": "none"}
-        }
-      }
-    ]
-  },
-  "data": {
-    "values": {
-      "target_g": 100,
-      "mode": "normal",
-      "sleep_enabled": false,
-      "sleep_interval_minutes": 30
-    }
-  },
-  "refresh": {"mode": "on_open"}
-}
-```
-
-The `controls` array is ordered and contains independent `field` and `action` elements. Every element declares a versioned `control_type` resolved through the native client control registry. This lets the backend select a known native control and place it correctly without describing Compose layout or animation details.
-
-Initial control types:
-
-- `text_input.v1`;
-- `number_input.v1`;
-- `select.v1`;
-- `toggle.v1` for a locally edited boolean field;
-- `action_toggle.v1` for an immediately submitted boolean command;
-- `slider.v1`;
-- `readonly.v1`;
-- `button.v1`;
-- `hold_action.v1` for a press-and-hold command.
-
-Initial value types:
-
-- `string`;
-- `integer`;
-- `decimal`;
-- `boolean`;
-- `duration`;
-- `timestamp`.
-
-Every action inside a block has its own request and body binding. Actions do not implicitly submit the block. The sleep toggle submits only its new boolean value. The sleep interval input owns a separate commit button which submits only that input. The capture-zero control submits no form values and uses a client-defined hold preset. A Save action may still explicitly bind several named fields. Updating one control must not accidentally submit unrelated draft values from the block.
-
-### Native control registry and presets
-
-The Android client maintains a registry keyed by `control_type` and optional `preset`:
-
-```text
-number_input.v1          -> native numeric input renderer
-action_toggle.v1         -> native switch with pending/error/revert behaviour
-hold_action.v1           -> native press-and-hold button renderer
-zero_capture_hold.v1     -> two-second hold, progress animation, haptic feedback
-```
-
-`id` identifies the semantic control instance agreed with the backend (`sleep_enabled`, `sleep_interval_minutes`, `capture_zero`). `control_type` selects reusable behaviour. `preset` selects a fully client-defined UX configuration. The server must not send animation frames, colours, gesture code, or arbitrary duration scripts.
-
-For `hold_action.v1`, the client completes the HTTP request only after the preset's hold gesture succeeds. Releasing early performs no request. While the request is pending, the control disables itself; the backend response supplies the new block state or a structured error.
-
-Presets are versioned contract identifiers. Changing the behaviour of an existing preset incompatibly requires a new identifier. An unknown required `control_type` or `preset` produces the explicit client-update-required state; an unknown optional control may be omitted.
-
-## Links and client binding
-
-Feature code must not hardcode endpoint paths, and the server must not send Kotlin handler names. The binding is an HTTP affordance included in the card:
-
-```json
-{
+  "kind": "action",
+  "id": "collect_statistics",
+  "label": "Collect statistics",
+  "control_type": "button.v1",
+  "enabled": true,
   "request": {
     "method": "POST",
-    "href": "/api/v3/devices/avocado/actions/start-watering",
-    "body": {"binding": "fields", "fields": ["target_g", "mode"]}
+    "href": "/api/v3/devices/550e8400-e29b-41d4-a716-446655440000/actions/collect-statistics",
+    "body": {"binding": "none"}
   }
 }
 ```
 
-The generic executor supports a deliberately small protocol:
+History item actions also reuse existing controls: `action_toggle.v1` for the
+fertilized flag, and `hold_action.v1` with `history_delete_hold.v1` for deletion.
+The API returns up to 50 history items and `next_offset`; the current Android
+renderer does not request further pages.
 
-- same-origin relative `href` only;
-- allowed methods: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`;
-- body bindings: `none`, `control_value`, `fields`, `selected_item`, and `literal`;
-- standard response: an updated block, updated card, or accepted asynchronous transition.
+### Existing form and action controls
 
-This is preferable to client URL hardcoding because routes can change without changing feature code. It is preferable to arbitrary executable server instructions because the client retains a small, auditable protocol.
+The current renderer uses these identifiers; this list does not propose new controls:
 
-For safety, the client rejects absolute URLs, unknown methods, unknown bindings, and unsupported required components.
+| Identifier | Existing rendering |
+| --- | --- |
+| `text_input.v1` | Text input |
+| `number_input.v1` | Text input with numeric keyboard |
+| `select.v1` | Selection buttons |
+| `readonly.v1` | Read-only text field |
+| `button.v1` | Button with pending state for its HTTP request |
+| `action_toggle.v1` | Switch with an optimistic value and HTTP error rollback |
+| `hold_action.v1` | Press-and-hold action |
 
-## Refresh policies
+Hold presets are `zero_capture_hold.v1` (2 seconds), `calibration_hold.v1`
+(3 seconds), and `history_delete_hold.v1` (5 seconds). Releasing before the hold
+completes sends no request. The current fallback for an unknown hold preset is
+2 seconds. No haptic feedback or strict preset compatibility check is implemented.
 
-Refresh is declared per block:
+Forms use `schema.controls` and `data.values`. A field's `commit.request` submits
+its explicitly declared binding. Numeric values are parsed as integer or decimal;
+boolean values are parsed as booleans, and other input is kept as text. There is
+no dedicated slider, local boolean-toggle field, duration, or timestamp editor.
 
-```json
-{"mode": "none"}
-{"mode": "once"}
-{"mode": "on_open"}
-{"mode": "manual"}
-{"mode": "poll", "interval_ms": 5000, "href": "...", "etag": "..."}
-{"mode": "stream", "href": "/api/v3/devices/avocado/card/events"}
-```
+### Requests and responses
 
-Semantics:
+The current Retrofit API uses GET for card/block reads and POST for advertised
+actions. `MainViewModel` passes the supplied `href` to this executor; it does not
+dispatch arbitrary HTTP methods from `request.method`.
 
-- `none`: embedded data is immutable for this card lifetime;
-- `once`: load once when the block first becomes visible;
-- `on_open`: refresh whenever that expandable block is opened;
-- `manual`: only an explicit user action refreshes it;
-- `poll`: poll only while visible, honouring the server interval and ETag;
-- `stream`: subscribe while visible and apply block/card updates by revision.
+Implemented body bindings in `bindBody` are:
 
-Recommended initial policies:
+- `none`: empty object;
+- `control_value`: one named property;
+- `fields`: only declared fields, with optional property-name mapping;
+- `literal`: the declared object;
+- `literal_and_control_value`: the declared object plus one control value.
 
-- overview: `poll`;
-- operation queue: `poll`;
-- control: `on_open`, with action responses replacing its state;
-- watering parameters: `on_open`, with save response replacing its state;
-- watering history: `on_open`, paginated on demand;
+Unknown bindings fail. There is no `selected_item` binding. Relative action links
+are supplied by the backend; the current action executor does not itself enforce
+an allowlist of URL schemes or HTTP methods.
 
-The server may return a changed refresh policy with any block response. The client must enforce reasonable global minimum and maximum polling intervals to protect itself from a bad manifest.
+Every successful action response has `accepted` and a complete `card`. Acceptance
+of a queued command is not its completion. The client replaces the returned device's
+card without changing which device is currently selected. A rejected action with
+`accepted: false` leaves the current card in place.
 
-## State projection
+### Refresh and revisions
 
-Commands submitted through block actions enter the backend queue. Workers and MCU
-callbacks update operation records. `DeviceCardService` exposes those records only
-through `operation_queue`; snapshot-backed blocks do not project desired or pending
-operation state. Android does not translate backend operation types or lifecycle
-statuses.
+The backend currently advertises `on_open` and `poll`. Overview and operation queue
+poll every 5 seconds; tank watering polls every 3 or 10 seconds according to its
+projection. Control, watering parameters, and history refresh on opening. Android
+clamps polling intervals to 2-300 seconds and polls only the active device's
+always-visible blocks and currently open expandable block.
 
-Every action currently returns the complete updated card:
+Each block response has its own `block_revision`. Android stores it under
+`device_id:block.id` and rejects responses older than the last accepted revision.
+History and operation queue use response creation time. Snapshot-backed blocks
+use source timestamps via `_calculate_block_revision`. There is no card revision.
+ETag, streaming, and referenced schemas are not implemented.
 
-```json
-{
-  "accepted": true,
-  "card": {
-    "device_id": "550e8400-e29b-41d4-a716-446655440000",
-    "profile": "plant.v1",
-    "schema_version": 1,
-    "blocks": []
-  }
-}
-```
+### Failure handling and implementation limits
 
-Queue item IDs may appear as opaque values inside server-advertised cancel requests.
-The client transports them unchanged and never interprets or tracks their lifecycle.
+Unknown required block kinds show an update-required message; unknown optional
+block kinds are omitted. Unknown action control types show an unsupported-control
+message. Unrecognized field control types currently fall back to a text input.
+The document does not claim strict schema-version or preset negotiation.
 
-## Versioning and caching
+Opening a block reports request errors through the existing card error handling.
+Background polling failures are logged and keep the last data; authentication
+failures clear the active session. Actions use the shared request handling and
+optional completion callback. No history-specific error/recovery mechanism exists.
 
-- `profile` versions native composition, for example `plant.v1`.
-- `schema_version` versions the block vocabulary and manifest contract.
-- `block_revision` orders responses of one block. Android keys it by
-  `device_id:block.id` and never compares revisions belonging to different blocks.
-  The polled operation-queue block uses response creation time, so removing the last
-  operation still produces a newer empty response without scanning terminal history.
-- Block GET endpoints should support `ETag` and `If-None-Match`.
-- Form schemas may be referenced by a cacheable `schema_href` when many devices share the same schema. Start with embedded schemas; introduce references only when payload size justifies the complexity.
+## Sources of this contract
 
-## Failure behaviour
-
-- Unsupported optional block: omit it and log telemetry.
-- Unsupported required block or newer incompatible schema: show an explicit client-update-required state.
-- Failed block request: show an error inside that block; do not destroy the whole card.
-- Failed action: return a structured error and, when possible, the latest block state.
-- Out-of-order block response: discard it only when its `block_revision` is older
-  than the rendered revision for the same `device_id:block.id`.
-
-## Current implementation boundary
-
-The replacement is complete. The HTTP layer contains only v3 authentication, Android
-release delivery, and device-card routes. All v2 routers and their compatibility
-adapters have been deleted. Queue records remain an internal backend model
-and are exposed to Android only as semantic `operation_queue` block items with an
-advertised per-item cancel action.
-
-The checked-in `smart_watering/public_api.openapi.yaml` is generated from the
-registered FastAPI routes. A regression test compares it with `/openapi.json`, so a
-route change must update the schema in the same change.
+- `smart_watering/public_api_app/card_service.py`: advertised blocks, controls,
+  actions, refresh policies, and revisions.
+- `client/app/src/main/java/com/smartwatering/app/ui/Screens.kt`: actual block and
+  control renderers.
+- `client/app/src/main/java/com/smartwatering/app/ui/MainViewModel.kt`: bindings,
+  request results, visible-block refresh, and revision comparison.
+- `client/app/src/main/java/com/smartwatering/app/api/ApiService.kt`: GET/POST API calls.
+- `smart_watering/public_api.openapi.yaml`: schema generated from FastAPI routes;
+  its regression test compares it with `/openapi.json`.

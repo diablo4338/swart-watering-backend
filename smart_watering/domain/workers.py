@@ -6,7 +6,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any
+from dataclasses import asdict
+from datetime import datetime
+from typing import Any, Callable
 
 from .foundation import (
     DEFAULT_NODE_PORT,
@@ -16,6 +18,8 @@ from .foundation import (
     OP_ACCEPTED,
     OP_ERROR,
     OP_SENDING,
+    OP_RUNNING,
+    OP_TERMINAL_STATUSES,
     OP_SUCCESS,
     OP_TIMEOUT,
     RETRYABLE_COMMANDS,
@@ -265,6 +269,13 @@ class BackgroundWorker:
                 active_started_at = 0.0
                 continue
 
+            operation = self.operations.get(command.operation_id)
+            if operation is not None and operation["operation_type"] == "statistics_collection":
+                self._collect_statistics(command, active_started_at)
+                active_command_id = None
+                active_started_at = 0.0
+                continue
+
             if command.device_name.startswith(DISCOVERY_DEVICE_PREFIX) and not self._is_discovery(command):
                 self.operations.event(
                     command.operation_id,
@@ -406,6 +417,40 @@ class BackgroundWorker:
                 continue
 
 
+    def _collect_statistics(self, command: QueuedCommand, started_at: float) -> None:
+        from smart_watering.application.watering_detection import PlantWateringDetector
+        from smart_watering.public_api_app.config import DEFAULT_PROMETHEUS_URL, PROMETHEUS_URL_ENV
+
+        operation = self.operations.get(command.operation_id)
+        if operation is None or operation["status"] in OP_TERMINAL_STATUSES:
+            self.queue.pop(command.id)
+            return
+        try:
+            if command.device_id is None:
+                raise SmartWateringError("backend operation requires a registered device ID")
+            payload = command.payload or {}
+            if payload.get("device_id") != command.device_id:
+                raise SmartWateringError("operation device ID mismatch")
+            if time.time() - started_at >= self.max_wait_sec:
+                self.operations.event(command.operation_id, OP_TIMEOUT, "backend operation deadline exceeded", source="worker")
+                return
+            self.operations.event(command.operation_id, OP_RUNNING, "backend operation running", source="worker")
+            detector = PlantWateringDetector(
+                self.queue.store, os.environ.get(PROMETHEUS_URL_ENV, DEFAULT_PROMETHEUS_URL)
+            )
+            result = detector.scan_device(
+                command.device_id, datetime.fromisoformat(payload["start"]), datetime.fromisoformat(payload["end"])
+            )
+            if not self.operations.is_cancelled(command.operation_id):
+                self.operations.update_result(command.operation_id, asdict(result))
+                status = OP_TIMEOUT if time.time() - started_at >= self.max_wait_sec else OP_SUCCESS
+                self.operations.event(command.operation_id, status, "statistics collected" if status == OP_SUCCESS else "backend operation deadline exceeded", source="worker")
+        except Exception as exc:
+            self.operations.event(command.operation_id, OP_ERROR, str(exc), source="worker")
+        finally:
+            self.queue.pop(command.id)
+
+
 class DeviceWorkerSupervisor:
     def __init__(
         self,
@@ -426,7 +471,10 @@ class DeviceWorkerSupervisor:
         self._lock = threading.Lock()
         self._was_idle = False
 
-    def run_forever(self, idle_interval_sec: int = NODE_WORKER_IDLE_INTERVAL_SEC) -> int:
+    def run_forever(
+        self, idle_interval_sec: int = NODE_WORKER_IDLE_INTERVAL_SEC,
+        *, enqueue_scheduled: Callable[[], None] | None = None,
+    ) -> int:
         self.state.save_pid(os.getpid())
         BackgroundWorker.log(
             f"started pid={os.getpid()} mode=per-device idle_interval={idle_interval_sec}s"
@@ -435,6 +483,8 @@ class DeviceWorkerSupervisor:
         try:
             while True:
                 now = time.monotonic()
+                if enqueue_scheduled is not None:
+                    enqueue_scheduled()
                 check_stale = now >= next_stale_check_at
                 self.start_pending_workers(check_stale=check_stale)
                 if check_stale:

@@ -33,16 +33,16 @@ Core Python services:
 
 | Variable | Default | Used by | Description |
 | --- | --- | --- | --- |
-| `SMART_WATERING_DB_PATH` | `/tmp/smart_watering_cli/smart_watering.db` locally, `/data/smart_watering.db` in Docker | CLI, callback node, worker, snapshotter, watering detector, public API | SQLite database path. All Python processes must point at the same database. |
+| `SMART_WATERING_DB_PATH` | `/tmp/smart_watering_cli/smart_watering.db` locally, `/data/smart_watering.db` in Docker | CLI, callback node, worker, snapshotter, public API | SQLite database path. All Python processes must point at the same database. |
 | `SMART_WATERING_NODE_URL` | auto-detected `http://<host-ip>:8080` | CLI, worker, callback URL builder | Public callback-node base URL sent to ESP devices as `callback_url`. In Docker/LAN setups this must be reachable from the devices, so do not use `localhost` unless the device runs on the same host. |
 | `SMART_WATERING_WORKER_IDLE_INTERVAL_SEC` | `1` | worker | Seconds the worker sleeps after a queue scan when there is no ready work. Lower values react faster but poll SQLite more often. |
 | `SMART_WATERING_WORKER_RETRY_INTERVAL_SEC` | `5` | worker | Seconds between retry attempts for retryable watering-start and sleep-disable commands while a device is asleep/offline. |
-| `SMART_WATERING_WORKER_MAX_WAIT_SEC` | `900` | worker | Maximum seconds the worker waits for retryable command delivery and final controller callbacks before timing out. |
+| `SMART_WATERING_WORKER_MAX_WAIT_SEC` | `900` | worker | Timeout for retryable command delivery and controller callbacks; also checked before and after history scans, without interrupting a scan in progress. |
 | `SMART_WATERING_SNAPSHOT_INTERVAL_SEC` | `300` | snapshotter | Seconds between periodic status snapshot enqueue passes. |
-| `SMART_WATERING_DETECTOR_INTERVAL_SEC` | `3600` | watering detector | Seconds between Prometheus scans for plant watering events. |
-| `SMART_WATERING_DETECTOR_LOOKBACK_HOURS` | `3` | watering detector | Overlapping history window scanned on every pass. |
-| `SMART_WATERING_DETECTION_WINDOW_MIN` | `5` | watering detector, CLI | Minutes after the first weight increase in which the maximum watering weight is selected. |
-| `SMART_WATERING_MAX_DETECTED_WATERING_G` | `1000` | watering detector, CLI | Maximum accepted detected watering increase. Larger jumps are retained as invalid anomalies and are not returned to the app. |
+| `SMART_WATERING_DETECTOR_INTERVAL_SEC` | `3600` | worker | Interval between enqueueing automatic history scans; execution follows the device queue. |
+| `SMART_WATERING_DETECTOR_LOOKBACK_HOURS` | `3` | worker | History window for automatic scans. Manual refresh always requests the previous 30 days. |
+| `SMART_WATERING_DETECTION_WINDOW_MIN` | `5` | worker, CLI | Minutes after the first weight increase in which the maximum watering weight is selected. |
+| `SMART_WATERING_MAX_DETECTED_WATERING_G` | `1000` | worker, CLI | Maximum accepted detected watering increase. Larger jumps are retained as invalid anomalies and are not returned to the app. |
 | `SMART_WATERING_CLI_OPERATION_WAIT_TIMEOUT_SEC` | `900` | CLI, helper scripts | Maximum seconds the CLI waits for a queued operation result before returning a timeout to the user. |
 
 Public API and auth:
@@ -54,7 +54,7 @@ Public API and auth:
 | `SMART_WATERING_GOOGLE_WEB_CLIENT_ID` | empty | public API, Android app | Google OAuth Web client ID. Required to enable Google Sign-In. |
 | `SMART_WATERING_GOOGLE_ALLOWED_EMAILS` | empty | public API | Comma-separated allowlist of Google account emails accepted by `/api/v3/auth/google`. |
 | `SMART_WATERING_GOOGLE_ALLOWED_DOMAINS` | empty | public API | Comma-separated allowlist of Google Workspace domains accepted by `/api/v3/auth/google`. Use this or `SMART_WATERING_GOOGLE_ALLOWED_EMAILS` when Google Sign-In is enabled. |
-| `SMART_WATERING_PROMETHEUS_URL` | `http://127.0.0.1:9090` | public API, watering detector, CLI | Prometheus server used for plant statistics and detected watering history. |
+| `SMART_WATERING_PROMETHEUS_URL` | `http://127.0.0.1:9090` | public API, worker, CLI | Prometheus server used for plant statistics and detected watering history. Docker Compose defaults to `http://host.docker.internal:9090`. |
 | `SMART_WATERING_STATISTICS_TIMEZONE` | `Europe/Berlin` | public API | Calendar timezone used for day (08:00–20:00) and night (20:00–08:00) periods. |
 
 Docker Compose host settings:

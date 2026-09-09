@@ -1458,6 +1458,7 @@ class OperationLog:
             operation_ids = session.scalars(
                 select(OperationRecord.operation_id).where(
                     OperationRecord.status.in_([OP_ACCEPTED, OP_RUNNING]),
+                    OperationRecord.operation_type != "statistics_collection",
                     OperationRecord.updated_at <= cutoff,
                 )
             ).all()

@@ -1,9 +1,11 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import os
-from typing import Any
 
-from smart_watering.domain import DeviceType, SmartWateringError, parse_positive_int
+from smart_watering.domain import (
+    DeviceType, DeviceRegistry, PlantWateringEventStore, SQLiteStore,
+    SmartWateringError, parse_positive_int,
+)
 from smart_watering.public_api_app.statistics import (
     WATER_WEIGHT_METRIC,
     PrometheusClient,
@@ -12,11 +14,9 @@ from smart_watering.public_api_app.statistics import (
     prometheus_string,
 )
 
-from .service import SmartWateringService
-
-
 @dataclass(frozen=True)
 class DetectionResult:
+    device_id: str
     device: str
     scanned_points: int
     detected: int
@@ -58,12 +58,13 @@ class PlantWateringDetector:
 
     def __init__(
         self,
-        app: SmartWateringService,
+        store: SQLiteStore,
         prometheus_url: str,
         max_amount_g: float | None = None,
         window_min: int | None = None,
     ) -> None:
-        self.app = app
+        self.registry = DeviceRegistry(store)
+        self.plant_waterings = PlantWateringEventStore(store)
         self.prometheus = PrometheusClient(prometheus_url)
         self.max_amount_g = (
             resolve_max_detected_watering_g()
@@ -81,9 +82,9 @@ class PlantWateringDetector:
     def scan_device(
         self, device_id: str, start: datetime, end: datetime
     ) -> DetectionResult:
-        device = self.app.registry.get_by_id(device_id)
+        device = self.registry.get_by_id(device_id)
         if device.device_type != DeviceType.PLANT:
-            return DetectionResult(device.name, 0, 0, 0, 0)
+            return DetectionResult(device.id, device.name, 0, 0, 0, 0)
         instance = prometheus_instance(device.base_url)
         selector = (
             f'{WATER_WEIGHT_METRIC}'
@@ -107,10 +108,10 @@ class PlantWateringDetector:
                 break
             chunk_start = chunk_end - overlap
         samples = sorted(samples_by_timestamp.items())
-        self.app.plant_waterings.invalidate_above_amount(
+        self.plant_waterings.invalidate_above_amount(
             device.id, self.max_amount_g
         )
-        self.app.plant_waterings.invalidate_exact_duplicates(device.id)
+        self.plant_waterings.invalidate_exact_duplicates(device.id)
         events = detect_watering_events(
             samples,
             window_sec=self.window_min * 60,
@@ -126,17 +127,18 @@ class PlantWateringDetector:
         created = 0
         for event in events:
             if event.get("_anomaly_recovery"):
-                self.app.plant_waterings.invalidate_events_inside(
+                self.plant_waterings.invalidate_events_inside(
                     device.id,
                     event["event_start_at"],
                     event["occurred_at"],
                     event["amount_g"],
                 )
-            _stored, was_created = self.app.plant_waterings.upsert_detected(
+            _stored, was_created = self.plant_waterings.upsert_detected(
                 device.id, event
             )
             created += int(was_created)
         return DetectionResult(
+            device.id,
             device.name,
             len(samples),
             len(events),
@@ -147,6 +149,6 @@ class PlantWateringDetector:
     def scan_all(self, start: datetime, end: datetime) -> list[DetectionResult]:
         return [
             self.scan_device(device.id, start, end)
-            for device in self.app.registry.list()
+            for device in self.registry.list()
             if device.device_type == DeviceType.PLANT
         ]

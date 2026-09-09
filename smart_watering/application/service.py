@@ -95,7 +95,10 @@ class SmartWateringService:
         operation_id = self.operations.create(
             device.id, operation_type, payload or {}, correlation_id, causation_id,
         )
-        command_payload = self.build_operation_payload(operation_id, payload)
+        command_payload = (
+            {**(payload or {}), "operation_id": operation_id}
+            if operation_type == "statistics_collection" else self.build_operation_payload(operation_id, payload)
+        )
         self.operations.update_payload(operation_id, command_payload)
         queued_id = self.queue.enqueue(
             operation_id, device.id, device.base_url, path, method,
@@ -274,6 +277,25 @@ class SmartWateringService:
         if isinstance(config, dict):
             self.registry.confirm_watering_settings(device.id, config, received_at)
         return received_at
+
+    def queue_statistics_collection(self, device_id: str, *, lookback_hours: int = 30 * 24) -> str:
+        from datetime import datetime, timedelta, timezone
+
+        device = self.registry.get_by_id(device_id)
+        if lookback_hours <= 0:
+            raise SmartWateringError("statistics lookback hours must be positive")
+        if device.device_type != DeviceType.PLANT:
+            raise SmartWateringError("statistics collection is only available for plant devices")
+        end = datetime.now(timezone.utc)
+        return self._enqueue(
+            device, "statistics_collection", "statistics_collection",
+            {
+                "device_id": device.id,
+                "start": (end - timedelta(hours=lookback_hours)).isoformat(),
+                "end": end.isoformat(),
+            },
+            f"refresh watering history for {device.name}",
+        )
 
     def latest_mcu_name(self, device_id: str) -> str | None:
         snapshot = self.snapshots.latest(device_id)

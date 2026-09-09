@@ -378,7 +378,7 @@ def test_detector_uses_previous_sample_at_fifty_minute_interval() -> None:
         app.registry.add("10.0.0.1", "plant", "plant_1")
         start = datetime(2026, 8, 3, 10, 25, tzinfo=timezone.utc)
         end = start + timedelta(hours=3)
-        detector = PlantWateringDetector(app, "http://prometheus")
+        detector = PlantWateringDetector(app.store, "http://prometheus")
         requested_ranges = []
 
         def range_samples(_query, range_start, range_end):
@@ -404,7 +404,7 @@ def test_detector_does_not_store_events_before_requested_range() -> None:
         app = smart_cli.SmartWateringCliApp(str(Path(temp_dir) / "test.db"))
         app.registry.add("10.0.0.1", "plant", "plant_1")
         start = datetime(2026, 8, 3, 10, 25, tzinfo=timezone.utc)
-        detector = PlantWateringDetector(app, "http://prometheus")
+        detector = PlantWateringDetector(app.store, "http://prometheus")
         detector.prometheus.range_samples = lambda *_args: [
             ((start - timedelta(minutes=50)).timestamp(), 3900.0),
             ((start - timedelta(minutes=30)).timestamp(), 4000.0),
