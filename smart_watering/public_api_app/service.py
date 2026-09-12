@@ -293,7 +293,8 @@ class DeviceStateProjectionService:
             samples = self.prometheus.range_samples(selector, start, query_end)
             value = None
             if samples:
-                value = round(adaptive_weight_change_per_hour(samples), 2)
+                rate = adaptive_weight_change_per_hour(samples)
+                value = round(rate, 2) if rate is not None else None
                 row[period_name] = value
             if end <= now:
                 completed_periods.append((end, period_name, value))

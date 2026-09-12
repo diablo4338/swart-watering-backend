@@ -1,4 +1,4 @@
-﻿import json
+import json
 import io
 import sqlite3
 import tempfile
@@ -179,7 +179,7 @@ def test_adaptive_weight_change_ignores_rapid_losses_around_increase() -> None:
         (900.0, 114.0),
     ]
 
-    assert statistics.adaptive_weight_change_per_hour(samples) == -20.0
+    assert statistics.adaptive_weight_change_per_hour(samples) is None
 
 
 def test_adaptive_weight_change_ignores_increase_at_threshold() -> None:
@@ -188,10 +188,10 @@ def test_adaptive_weight_change_ignores_increase_at_threshold() -> None:
     assert statistics.adaptive_weight_change_per_hour(exactly_ten_grams) == 0.0
 
 
-def test_adaptive_weight_change_ignores_drop_above_rate_limit() -> None:
+def test_adaptive_weight_change_ignores_abrupt_drop_above_25_grams() -> None:
     samples = [
         (0.0, 100.0),
-        (60.0, 80.0),
+        (60.0, 70.0),
         (120.0, 100.0),
         (180.0, 95.0),
         (240.0, 65.0),
@@ -201,7 +201,7 @@ def test_adaptive_weight_change_ignores_drop_above_rate_limit() -> None:
     assert statistics.adaptive_weight_change_per_hour(samples) == -5.0
 
 
-def test_adaptive_weight_change_ignores_invalid_values_before_delta_filter() -> None:
+def test_adaptive_weight_change_bridges_invalid_values_within_one_hour() -> None:
     samples = [
         (0.0, 100.0),
         (300.0, 0.0),
@@ -219,9 +219,8 @@ def test_adaptive_weight_change_applies_25_grams_per_hour_limit() -> None:
         (60 * 60.0, 80.0),
     ]
 
-    # The ranked 30-minute limit is 12.5 g, so -14 g is ignored and the
-    # following -6 g transition is included.
-    assert statistics.adaptive_weight_change_per_hour(samples) == -6.0
+    # Validate the accumulated hour: both drops total 20 g, below 25 g/hour.
+    assert statistics.adaptive_weight_change_per_hour(samples) == -20.0
 
 
 def test_adaptive_weight_change_does_not_double_count_small_sensor_noise() -> None:
@@ -236,7 +235,7 @@ def test_adaptive_weight_change_does_not_double_count_small_sensor_noise() -> No
     assert statistics.adaptive_weight_change_per_hour(samples) == -2.0
 
 
-def test_adaptive_weight_change_allows_up_to_five_grams_between_close_points() -> None:
+def test_adaptive_weight_change_rejects_sixty_grams_per_hour() -> None:
     samples = [
         (0.0, 100.0),
         (60.0, 99.0),
@@ -244,7 +243,7 @@ def test_adaptive_weight_change_allows_up_to_five_grams_between_close_points() -
         (180.0, 97.0),
     ]
 
-    assert statistics.adaptive_weight_change_per_hour(samples) == -60.0
+    assert statistics.adaptive_weight_change_per_hour(samples) is None
 
 
 def test_detect_watering_events_records_end_of_multi_sample_rise() -> None:
