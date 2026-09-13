@@ -11,6 +11,7 @@ from .errors import PublicApiError
 
 WATER_WEIGHT_METRIC = "gross_weight_g"
 WEIGHT_INCREASE_RESET_G = 10.0
+MIN_DETECTED_WATERING_G = 50.0
 MAX_VALID_CONSUMPTION_RATE_G_PER_HOUR = 25.0
 WATERING_DETECTION_WINDOW_SEC = 5 * 60
 WATER_CONSUMPTION_HISTORY_DAYS = 7
@@ -90,7 +91,7 @@ def adaptive_weight_change_per_hour(samples: list[tuple[float, float]]) -> float
 def detect_watering_events(
     samples: list[tuple[float, float]],
     window_sec: int = WATERING_DETECTION_WINDOW_SEC,
-    threshold_g: float = WEIGHT_INCREASE_RESET_G,
+    threshold_g: float = MIN_DETECTED_WATERING_G,
     max_amount_g: float = 1000.0,
 ) -> list[dict[str, float]]:
     """Detect watering from each rise and the maximum in its next time window."""

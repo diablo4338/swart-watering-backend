@@ -252,8 +252,8 @@ def test_detect_watering_events_records_end_of_multi_sample_rise() -> None:
         (60.0, 104.0),
         (120.0, 112.0),
         (180.0, 125.0),
-        (240.0, 130.0),
-        (360.0, 132.0),
+        (240.0, 150.0),
+        (360.0, 152.0),
         (420.0, 129.0),
     ]
 
@@ -262,8 +262,8 @@ def test_detect_watering_events_records_end_of_multi_sample_rise() -> None:
             "event_start_at": 0.0,
             "occurred_at": 360.0,
             "weight_before_g": 100.0,
-            "weight_after_g": 132.0,
-            "amount_g": 32.0,
+            "weight_after_g": 152.0,
+            "amount_g": 52.0,
         }
     ]
 
@@ -284,17 +284,24 @@ def test_detect_watering_events_treats_rises_more_than_five_minutes_apart_separa
 
 
 def test_detect_watering_events_includes_rise_equal_to_threshold() -> None:
-    samples = [(0.0, 100.0), (60.0, 110.0)]
+    samples = [(0.0, 100.0), (60.0, 150.0)]
 
     assert statistics.detect_watering_events(samples) == [
         {
             "event_start_at": 0.0,
             "occurred_at": 60.0,
             "weight_before_g": 100.0,
-            "weight_after_g": 110.0,
-            "amount_g": 10.0,
+            "weight_after_g": 150.0,
+            "amount_g": 50.0,
         }
     ]
+
+
+def test_detect_watering_events_ignores_rises_below_50_g() -> None:
+    for amount_g in (10.0, 30.0, 49.0, 49.9):
+        assert statistics.detect_watering_events(
+            [(0.0, 100.0), (60.0, 100.0 + amount_g)]
+        ) == []
 
 
 def test_detect_watering_events_does_not_cap_accumulated_gradual_rise() -> None:
@@ -323,7 +330,7 @@ def test_detect_watering_events_does_not_cap_accumulated_gradual_rise() -> None:
 def test_detect_watering_events_merges_saw_teeth_until_last_rise_is_quiet() -> None:
     samples = [
         (0.0, 100.0),
-        (60.0, 130.0),
+        (60.0, 160.0),
         (120.0, 120.0),
         (240.0, 125.0),
         # This is already more than five minutes after the absolute maximum,
@@ -337,8 +344,8 @@ def test_detect_watering_events_merges_saw_teeth_until_last_rise_is_quiet() -> N
             "event_start_at": 0.0,
             "occurred_at": 60.0,
             "weight_before_g": 100.0,
-            "weight_after_g": 130.0,
-            "amount_g": 30.0,
+            "weight_after_g": 160.0,
+            "amount_g": 60.0,
         }
     ]
 
@@ -3378,7 +3385,5 @@ def test_public_api_status_latest_does_not_mix_pending_operation_with_snapshot()
         assert body["operation_id"] is None
         assert "pending_operation_id" not in body
         assert "pending_operation_status" not in body
-
-
 
 

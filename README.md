@@ -41,7 +41,7 @@ Core Python services:
 | `SMART_WATERING_SNAPSHOT_INTERVAL_SEC` | `300` | snapshotter | Seconds between periodic status snapshot enqueue passes. |
 | `SMART_WATERING_DETECTOR_INTERVAL_SEC` | `3600` | worker | Interval between enqueueing automatic history scans; execution follows the device queue. |
 | `SMART_WATERING_DETECTOR_LOOKBACK_HOURS` | `3` | worker | History window for automatic scans. Manual refresh always requests the previous 30 days. |
-| `SMART_WATERING_DETECTION_WINDOW_MIN` | `5` | worker, CLI | Minutes after the first weight increase in which the maximum watering weight is selected. |
+| `SMART_WATERING_DETECTION_WINDOW_MIN` | `5` | worker, CLI | Minutes after the first weight increase in which the maximum watering weight is selected. Only increases of at least 50 g are detected as watering. |
 | `SMART_WATERING_MAX_DETECTED_WATERING_G` | `1000` | worker, CLI | Maximum accepted detected watering increase. Larger jumps are retained as invalid anomalies and are not returned to the app. |
 | `SMART_WATERING_CLI_OPERATION_WAIT_TIMEOUT_SEC` | `900` | CLI, helper scripts | Maximum seconds the CLI waits for a queued operation result before returning a timeout to the user. |
 
