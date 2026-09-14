@@ -3,7 +3,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, time, timedelta
-from math import isclose, isfinite
 from statistics import median
 
 from .errors import PublicApiError
@@ -11,80 +10,9 @@ from .errors import PublicApiError
 
 WATER_WEIGHT_METRIC = "gross_weight_g"
 WEIGHT_INCREASE_RESET_G = 10.0
-MAX_VALID_CONSUMPTION_RATE_G_PER_HOUR = 25.0
 WATERING_DETECTION_WINDOW_SEC = 5 * 60
 WATER_CONSUMPTION_HISTORY_DAYS = 7
 PROMETHEUS_SAMPLE_INTERVAL_SEC = 60
-CONSUMPTION_RATE_WINDOW_SEC = 3600
-MAX_VALID_CONSUMPTION_GAP_SEC = 3600
-
-
-def adaptive_weight_change_per_hour(samples: list[tuple[float, float]]) -> float | None:
-    """Average consumption, bridging gaps up to one hour and excluding longer ones."""
-    ordered = sorted(
-        sample for sample in samples
-        if isfinite(sample[0]) and isfinite(sample[1]) and sample[1] > 0
-    )
-    if len(ordered) < 2:
-        return None
-
-    elapsed_hours = 0.0
-    change = 0.0
-    window_hours = 0.0
-    window_change = 0.0
-
-    def finish_window() -> None:
-        nonlocal elapsed_hours, change, window_hours, window_change
-        allowed = MAX_VALID_CONSUMPTION_RATE_G_PER_HOUR * window_hours
-        if -window_change <= allowed or isclose(
-            -window_change, allowed, rel_tol=1e-9, abs_tol=1e-9
-        ):
-            elapsed_hours += window_hours
-            change += window_change
-        window_hours = 0.0
-        window_change = 0.0
-
-    baseline_weight = ordered[0][1]
-    previous = ordered[0]
-    for timestamp, weight in ordered[1:]:
-        interval_seconds = timestamp - previous[0]
-        if interval_seconds <= 0 or interval_seconds > MAX_VALID_CONSUMPTION_GAP_SEC:
-            finish_window()
-            baseline_weight = weight
-            previous = (timestamp, weight)
-            continue
-        interval_hours = interval_seconds / 3600.0
-        window_hours += interval_hours
-        # The MCU exports whole grams. Do not extrapolate each one-gram
-        # staircase step into a minute rate; validate the accumulated hour.
-        allowed_drop = MAX_VALID_CONSUMPTION_RATE_G_PER_HOUR * max(1.0, interval_hours)
-        # Compare with the consumption baseline, not the previous noisy point.
-        # Returning from a positive spike must not discard a new weight minimum.
-        difference = weight - baseline_weight
-        # Subtracting large weights can introduce rounding error at the limit.
-        if difference < -allowed_drop and not isclose(
-            -difference, allowed_drop, rel_tol=1e-9, abs_tol=1e-9
-        ):
-            baseline_weight = weight
-            previous = (timestamp, weight)
-            if window_hours * 3600 >= CONSUMPTION_RATE_WINDOW_SEC - 1e-9:
-                finish_window()
-            continue
-
-        if difference < 0:
-            window_change += difference
-            baseline_weight = weight
-        elif difference > 0:
-            # A real upward baseline shift is watering. Small positive noise
-            # does not move the baseline, so its reversal is not counted twice.
-            if difference > WEIGHT_INCREASE_RESET_G:
-                baseline_weight = weight
-        previous = (timestamp, weight)
-        if window_hours * 3600 >= CONSUMPTION_RATE_WINDOW_SEC - 1e-9:
-            finish_window()
-
-    finish_window()
-    return change / elapsed_hours if elapsed_hours > 0 else None
 
 
 def detect_watering_events(

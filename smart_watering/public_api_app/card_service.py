@@ -1,5 +1,6 @@
 ﻿import time
 from typing import Any
+from threading import Lock
 
 from smart_watering.domain import DEVICE_TYPES, OP_CANCELLED, SmartWateringError
 
@@ -12,6 +13,8 @@ class DeviceCardService:
     def __init__(self, runtime: Any) -> None:
         self.runtime = runtime
         self._project_statistics_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+        self._statistics_locks: dict[str, Any] = {}
+        self._statistics_locks_guard = Lock()
 
     @property
     def business(self) -> Any:
@@ -52,6 +55,7 @@ class DeviceCardService:
                 parameters if include_deferred_data else self._as_deferred_block_descriptor(parameters),
                 self._project_watering_history_block(device) if include_deferred_data
                 else self._project_watering_history_descriptor(device),
+                self._consumption_analysis_descriptor(device),
             ])
         else:
             blocks.append(self._project_tank_watering_block(device, status, operations))
@@ -65,6 +69,12 @@ class DeviceCardService:
 
     def project_block(self, device_id: str, block_id: str) -> dict[str, Any]:
         device = self.business.registry.get_by_id(device_id)
+        if block_id == "consumption_analysis" and device.device_type == "plant":
+            return {
+                "device_id": device.id,
+                "block_revision": time.time_ns() // 1_000_000,
+                "block": self._project_consumption_analysis_block(device),
+            }
         if block_id == "operation_queue":
             operations = self._load_active_operations(device.id)
             return {
@@ -323,6 +333,27 @@ class DeviceCardService:
             "body": {"binding": binding, **body},
         }
 
+    @staticmethod
+    def _consumption_analysis_descriptor(device: Any) -> dict[str, Any]:
+        return {
+            "id": "consumption_analysis", "kind": "consumption_analysis",
+            "slot": "statistics", "title": "Consumption analysis",
+            "required": False, "data": {},
+            "refresh": {
+                "mode": "on_open",
+                "href": f"/api/v3/devices/{device.id}/card/blocks/consumption_analysis",
+            },
+        }
+
+    def _project_consumption_analysis_block(self, device: Any) -> dict[str, Any]:
+        statistics = self._project_statistics(device.id)
+        consumption = next((item for item in statistics if item["kind"] == "water_consumption"), {})
+        return {**self._consumption_analysis_descriptor(device), "data": {
+            "days": consumption.get("days", []),
+            "snapshot_at": consumption.get("snapshot_at"),
+            "snapshot_label": consumption.get("snapshot_label"),
+        }}
+
     def _project_overview_block(
         self,
         device: Any,
@@ -350,9 +381,14 @@ class DeviceCardService:
             )
             statistics = [
                 {
-                    key: value
-                    for key, value in statistic.items()
-                    if key != "latest_full_period_rate_g_per_hour"
+                    "kind": statistic["kind"],
+                    "snapshot_at": statistic.get("snapshot_at"),
+                    "days": [{
+                        key: row[key] for key in (
+                            "date", "day", "night",
+                            "day_below_weekly_median", "night_below_weekly_median",
+                        ) if key in row
+                    } for row in statistic["days"]],
                 }
                 for statistic in statistics
             ]
@@ -696,6 +732,13 @@ class DeviceCardService:
         )
 
     def _project_statistics(self, device_id: str) -> list[dict[str, Any]]:
+        # Concurrent summary/detail requests must share one snapshot fetch.
+        with self._statistics_locks_guard:
+            lock = self._statistics_locks.setdefault(device_id, Lock())
+        with lock:
+            return self._load_statistics_snapshot(device_id)
+
+    def _load_statistics_snapshot(self, device_id: str) -> list[dict[str, Any]]:
         now = time.monotonic()
         cached = self._project_statistics_cache.get(device_id)
         if cached is not None and cached[0] > now:
@@ -705,6 +748,8 @@ class DeviceCardService:
             value = [{
                 "kind": "water_consumption",
                 "days": consumption["days"],
+                "snapshot_at": consumption.get("snapshot_at"),
+                "snapshot_label": consumption.get("snapshot_label"),
                 "latest_full_period_rate_g_per_hour": consumption.get(
                     "latest_full_period_rate_g_per_hour"
                 ),

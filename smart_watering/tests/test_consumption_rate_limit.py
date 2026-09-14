@@ -2,7 +2,8 @@ import pytest
 import json
 from pathlib import Path
 
-from smart_watering.public_api_app.statistics import adaptive_weight_change_per_hour
+from smart_watering.public_api_app.consumption_average import adaptive_weight_change_per_hour
+from smart_watering.public_api_app.statistics import water_consumption_periods
 
 
 def test_recorded_prometheus_day_preserves_consumption_after_noise():
@@ -92,8 +93,10 @@ def test_api_projection_applies_rate_limit(rate, expected):
     device = SimpleNamespace(id="plant-id", name="Plant", device_type="plant", base_url="http://192.0.2.1")
     business = SimpleNamespace(registry=SimpleNamespace(get_by_id=lambda device_id: device))
     service = DeviceStateProjectionService(business, "http://prometheus.invalid", ZoneInfo("UTC"))
-    service.prometheus.range_samples = lambda *_args: [
-        (minute * 60, round(1000 - minute * rate / 60)) for minute in range(61)
+    service.prometheus.range_samples = lambda _query, _start, end: [
+        (start.timestamp() + minute * 60, round(1000 - minute * rate / 60))
+        for _, _, start, _ in water_consumption_periods(end)
+        for minute in range(61) if start.timestamp() + minute * 60 <= end.timestamp()
     ]
 
     result = service.project_water_consumption(device.id)

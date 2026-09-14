@@ -4,7 +4,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from smart_watering.public_api_app.service import DeviceStateProjectionService
-from smart_watering.public_api_app.statistics import adaptive_weight_change_per_hour
+from smart_watering.public_api_app.consumption_average import adaptive_weight_change_per_hour
+from smart_watering.public_api_app.statistics import water_consumption_periods
 
 
 @pytest.mark.parametrize("gap_end", [3661, 7200, 36000])
@@ -42,7 +43,11 @@ def test_projection_returns_gap_adjusted_rate_or_null(samples, expected):
     device = SimpleNamespace(id="plant-id", name="Plant", device_type="plant", base_url="http://192.0.2.1")
     business = SimpleNamespace(registry=SimpleNamespace(get_by_id=lambda device_id: device))
     service = DeviceStateProjectionService(business, "http://prometheus.invalid", ZoneInfo("UTC"))
-    service.prometheus.range_samples = lambda *_args: samples
+    service.prometheus.range_samples = lambda _query, _start, end: [
+        (start.timestamp() + offset, weight)
+        for _, _, start, _ in water_consumption_periods(end)
+        for offset, weight in samples if start.timestamp() + offset <= end.timestamp()
+    ]
 
     result = service.project_water_consumption(device.id)
 

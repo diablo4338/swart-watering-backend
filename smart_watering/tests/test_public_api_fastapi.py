@@ -243,7 +243,7 @@ def test_v3_device_card_exposes_server_driven_blocks_and_actions() -> None:
         blocks = {block["id"]: block for block in card.json()["blocks"]}
         assert list(blocks) == [
             "overview", "control", "watering_parameters", "watering_history",
-            "operation_queue",
+            "consumption_analysis", "operation_queue",
         ]
         controls = {
             control["id"]: control
@@ -253,6 +253,8 @@ def test_v3_device_card_exposes_server_driven_blocks_and_actions() -> None:
         assert controls["capture_zero"]["preset"] == "zero_capture_hold.v1"
         assert blocks["control"]["data"] == {}
         assert blocks["watering_parameters"]["data"] == {}
+        assert blocks["consumption_analysis"]["data"] == {}
+        assert blocks["consumption_analysis"]["refresh"]["mode"] == "on_open"
         assert {
             control["id"]
             for control in blocks["watering_parameters"]["schema"]["controls"]

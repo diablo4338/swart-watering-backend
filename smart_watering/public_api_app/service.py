@@ -10,10 +10,12 @@ from smart_watering.domain import SmartWateringError
 
 from .domain import DeviceStatus, DeviceStatusSource, number_or_none
 from .errors import PublicApiError
+from . import consumption_average
+from .consumption_diagnostics import consumption_diagnostics
+from .consumption_result import AverageConsumptionResult
 from .statistics import (
     WATER_WEIGHT_METRIC,
     PrometheusClient,
-    adaptive_weight_change_per_hour,
     consumption_is_below_median,
     prometheus_instance,
     prometheus_string,
@@ -272,11 +274,17 @@ class DeviceStateProjectionService:
         selector = f'{WATER_WEIGHT_METRIC}{{instance="{prometheus_string(instance)}"}}'
         now = datetime.now(self.statistics_timezone)
         rows: dict[Any, dict[str, Any]] = {}
+        daily_results: dict[Any, list[AverageConsumptionResult]] = {}
+        daily_bounds: dict[Any, tuple[datetime, datetime]] = {}
         completed_periods: list[tuple[datetime, str, float | None]] = []
         history_days = max(7, self.consumption_median_days + 2)
-        for period_date, period_name, start, end in water_consumption_periods(
-            now, history_days
-        ):
+        periods = water_consumption_periods(now, history_days)
+        # Freeze one history response for every day, median, and diagnostic.
+        # Adjacent periods share their boundary sample from this same snapshot.
+        history_samples = tuple(self.prometheus.range_samples(
+            selector, min(start for _, _, start, _ in periods), now,
+        ))
+        for period_date, period_name, start, end in periods:
             row = rows.setdefault(
                 period_date,
                 {
@@ -290,14 +298,23 @@ class DeviceStateProjectionService:
             query_end = water_consumption_query_end(start, end, now)
             if query_end is None:
                 continue
-            samples = self.prometheus.range_samples(selector, start, query_end)
-            value = None
-            if samples:
-                rate = adaptive_weight_change_per_hour(samples)
-                value = round(rate, 2) if rate is not None else None
-                row[period_name] = value
+            previous_bounds = daily_bounds.get(period_date, (start, query_end))
+            daily_bounds[period_date] = (min(start, previous_bounds[0]), max(query_end, previous_bounds[1]))
+            start_at, end_at = start.timestamp(), query_end.timestamp()
+            samples = [sample for sample in history_samples if start_at <= sample[0] <= end_at]
+            average = consumption_average.calculate_average_consumption(samples)
+            daily_results.setdefault(period_date, []).append(average)
+            value = round(average.rate, 2) if average.rate is not None else None
+            row[period_name] = value
+            row[f"{period_name}_analysis"] = consumption_diagnostics(samples, average, start, query_end)
             if end <= now:
                 completed_periods.append((end, period_name, value))
+
+        for period_date, results in daily_results.items():
+            start, end = daily_bounds[period_date]
+            samples = [sample for sample in history_samples if start.timestamp() <= sample[0] <= end.timestamp()]
+            average = consumption_average.combine_average_results(results)
+            rows[period_date]["analysis"] = consumption_diagnostics(samples, average, start, end)
 
         if completed_periods:
             latest_end, latest_name, latest_value = max(
@@ -350,6 +367,8 @@ class DeviceStateProjectionService:
             "device_id": device.id,
             "device_name": device.name,
             "days": list(rows.values())[:7],
+            "snapshot_at": now.timestamp(),
+            "snapshot_label": now.strftime("%d.%m.%Y %H:%M:%S %Z"),
             "latest_full_period_rate_g_per_hour": latest_full_period_rate,
         }
 
