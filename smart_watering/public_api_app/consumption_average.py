@@ -204,11 +204,29 @@ def calculate_average_consumption(samples: list[tuple[float, float]]) -> Average
 
 
 def combine_average_results(results: list[AverageConsumptionResult]) -> AverageConsumptionResult:
-    """Combine period estimates here, never in the diagnostic evaluator."""
+    """Weight day/night estimates by the time they represent, including gaps.
+
+    A missing daytime stretch must not give the slower nighttime estimate more
+    weight. Represent internal data gaps by the estimate of that same period;
+    never use their unknown weight loss as measured consumption. Rejected and
+    pending intervals remain excluded, as do periods without a usable estimate.
+    """
     usable = [result for result in results if result.rate is not None and result.counted_seconds > 0]
     seconds = sum(result.counted_seconds for result in usable)
+    weights = [
+        result.counted_seconds + sum(
+            interval.end_at - interval.start_at
+            for interval in result.intervals
+            if not interval.included and interval.reason == "gap"
+        )
+        for result in usable
+    ]
+    represented_seconds = sum(weights)
     return AverageConsumptionResult(
-        rate=sum(result.rate * result.counted_seconds for result in usable) / seconds if seconds > 0 else None,
+        rate=(
+            sum(result.rate * weight for result, weight in zip(usable, weights)) / represented_seconds
+            if represented_seconds > 0 else None
+        ),
         counted_seconds=seconds,
         change_g=sum(result.change_g for result in usable),
         intervals=[interval for result in results for interval in result.intervals],
