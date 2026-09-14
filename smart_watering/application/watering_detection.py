@@ -8,6 +8,7 @@ from smart_watering.domain import (
 )
 from smart_watering.public_api_app.statistics import (
     WATER_WEIGHT_METRIC,
+    MIN_DETECTED_WATERING_G,
     PrometheusClient,
     detect_watering_events,
     prometheus_instance,
@@ -41,8 +42,10 @@ def resolve_max_detected_watering_g() -> float:
         raise SmartWateringError(
             f"{MAX_DETECTED_WATERING_G_ENV} must be a number"
         ) from exc
-    if value <= 10:
-        raise SmartWateringError(f"{MAX_DETECTED_WATERING_G_ENV} must be > 10")
+    if value <= MIN_DETECTED_WATERING_G:
+        raise SmartWateringError(
+            f"{MAX_DETECTED_WATERING_G_ENV} must be > {MIN_DETECTED_WATERING_G:g}"
+        )
     return value
 
 
