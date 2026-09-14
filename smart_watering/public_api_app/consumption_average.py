@@ -63,6 +63,33 @@ def adaptive_weight_change_per_hour(samples: list[tuple[float, float]]) -> float
     return calculate_average_consumption(samples).rate
 
 
+def _baseline_rise_kind(
+    samples: list[tuple[float, float]], index: int, baseline: float,
+) -> str:
+    """Check a moderate rise against the estimator's actual consumption base."""
+    timestamp, weight = samples[index]
+    if (
+        weight - baseline > TRANSIENT_WEIGHT_MAX_G
+        or timestamp - samples[index - 1][0] > MAX_FILTER_SAMPLE_INTERVAL_SEC
+    ):
+        return "persistent"
+    previous_t = timestamp
+    for next_t, next_weight in samples[index + 1:]:
+        if (
+            next_t - timestamp > TRANSIENT_WEIGHT_WINDOW_SEC
+            or not 0 < next_t - previous_t <= MAX_FILTER_SAMPLE_INTERVAL_SEC
+            or next_weight - baseline > TRANSIENT_WEIGHT_MAX_G
+        ):
+            return "persistent"
+        allowed_loss = MAX_VALID_CONSUMPTION_RATE_G_PER_HOUR * (next_t - timestamp) / 3600
+        if -allowed_loss - TRANSIENT_WEIGHT_RETURN_TOLERANCE_G <= next_weight - baseline <= TRANSIENT_WEIGHT_RETURN_TOLERANCE_G:
+            return "transient"
+        if next_t - timestamp >= TRANSIENT_WEIGHT_WINDOW_SEC:
+            return "persistent"
+        previous_t = next_t
+    return "pending"
+
+
 def calculate_average_consumption(samples: list[tuple[float, float]]) -> AverageConsumptionResult:
     """Compute the rate and its audit trail in the same pass."""
     ordered = sorted(
@@ -105,7 +132,7 @@ def calculate_average_consumption(samples: list[tuple[float, float]]) -> Average
 
     baseline_weight = ordered[0][1]
     previous = ordered[0]
-    for timestamp, weight in ordered[1:]:
+    for index, (timestamp, weight) in enumerate(ordered[1:], start=1):
         interval_seconds = timestamp - previous[0]
         if interval_seconds <= 0 or interval_seconds > MAX_VALID_CONSUMPTION_GAP_SEC:
             finish_window()
@@ -114,6 +141,20 @@ def calculate_average_consumption(samples: list[tuple[float, float]]) -> Average
             baseline_weight = weight
             previous = (timestamp, weight)
             continue
+        difference = weight - baseline_weight
+        rise_kind = (
+            _baseline_rise_kind(ordered, index, baseline_weight)
+            if difference > WEIGHT_INCREASE_RESET_G else None
+        )
+        if rise_kind == "pending":
+            # An unfinished excursion must not increase the base or dilute the
+            # rate with unconfirmed time. Re-evaluate it on the next snapshot.
+            finish_window()
+            result.intervals.append(ConsumptionInterval(
+                previous[0], ordered[-1][0], False, "pending_weight_increase",
+                reason_label="Excluded: weight increase awaiting confirmation",
+            ))
+            break
         interval_hours = interval_seconds / 3600.0
         window_hours += interval_hours
         interval = ConsumptionInterval(previous[0], timestamp, True, "consumption")
@@ -123,7 +164,6 @@ def calculate_average_consumption(samples: list[tuple[float, float]]) -> Average
         allowed_drop = MAX_VALID_CONSUMPTION_RATE_G_PER_HOUR * max(1.0, interval_hours)
         # Compare with the consumption baseline, not the previous noisy point.
         # Returning from a positive spike must not discard a new weight minimum.
-        difference = weight - baseline_weight
         # Subtracting large weights can introduce rounding error at the limit.
         if difference < -allowed_drop and not isclose(
             -difference, allowed_drop, rel_tol=1e-9, abs_tol=1e-9
@@ -144,9 +184,14 @@ def calculate_average_consumption(samples: list[tuple[float, float]]) -> Average
             # A real upward baseline shift is watering. Small positive noise
             # does not move the baseline, so its reversal is not counted twice.
             if difference > WEIGHT_INCREASE_RESET_G:
-                interval.reason = "weight_increase"
-                interval.reason_label = "Time counted; weight increase excluded"
-                baseline_weight = weight
+                if rise_kind == "transient":
+                    interval.reason = "transient_weight_increase"
+                    interval.reason_label = "Time counted; temporary weight increase ignored"
+                    result.filtered_samples += 1
+                else:
+                    interval.reason = "weight_increase"
+                    interval.reason_label = "Time counted; weight increase excluded"
+                    baseline_weight = weight
         previous = (timestamp, weight)
         if window_hours * 3600 >= CONSUMPTION_RATE_WINDOW_SEC - 1e-9:
             finish_window()
