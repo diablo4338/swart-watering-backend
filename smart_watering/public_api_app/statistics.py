@@ -1,4 +1,6 @@
 import json
+import math
+import time as system_time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -125,6 +127,56 @@ def water_consumption_elapsed_hours(start: datetime, query_end: datetime) -> flo
 class PrometheusClient:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url
+
+    def weight_at(self, instance: str, at: datetime) -> tuple[float, float] | None:
+        """Nearest finite raw measurement on either side; ties prefer the earlier one."""
+        target = at.timestamp()
+        now = system_time.time()
+        radius = 3600
+        while True:
+            start = max(0, target - radius)
+            end = min(now, target + radius)
+            samples = self._weight_samples(instance, start, end)
+            if samples:
+                return min(samples, key=lambda sample: (abs(sample[0] - target), sample[0]))
+            if start == 0 and end == now:
+                return None
+            radius *= 24
+
+    def _weight_samples(
+        self, instance: str, start: float, end: float,
+    ) -> list[tuple[float, float]]:
+        # Raw range selectors preserve scrape timestamps; query_range would resample them.
+        duration = math.ceil(end - start) + 1
+        query = f'{WATER_WEIGHT_METRIC}{{instance="{prometheus_string(instance)}"}}[{duration}s]'
+        query_string = urllib.parse.urlencode({"query": query, "time": end})
+        request = urllib.request.Request(
+            f"{self.base_url.rstrip('/')}/api/v1/query?{query_string}",
+            headers={"Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (OSError, ValueError) as exc:
+            raise PublicApiError("Prometheus is unavailable", 424, "prometheus_unavailable") from exc
+        try:
+            if payload["status"] != "success":
+                raise PublicApiError("Prometheus query failed", 424, "prometheus_query_failed")
+            data = payload["data"]
+            if data["resultType"] != "matrix" or not isinstance(data["result"], list):
+                raise ValueError("expected a matrix")
+            results = data["result"]
+            if len(results) > 1:
+                raise PublicApiError(
+                    "Multiple weight series for this device", 424, "ambiguous_weight_series"
+                )
+            if not results:
+                return []
+            samples = [(float(t), float(v)) for t, v in results[0]["values"]]
+            return [(t, v) for t, v in samples if math.isfinite(t) and math.isfinite(v)
+                    and start <= t <= end]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PublicApiError("Invalid Prometheus response", 424, "invalid_prometheus_response") from exc
 
     def range_samples(
         self, query: str, start: datetime, end: datetime

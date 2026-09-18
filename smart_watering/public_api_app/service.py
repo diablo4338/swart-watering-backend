@@ -1,6 +1,6 @@
 ﻿import time
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -259,6 +259,43 @@ class DeviceStateProjectionService:
                 "message": str(exc),
                 "retryable": True,
             },
+        }
+
+    def project_weight_difference(self, device_id: str, period: Any) -> dict[str, Any]:
+        device = self.business.registry.get_by_id(device_id)
+        try:
+            if not isinstance(period, dict) or set(period) != {"start", "end"}:
+                raise ValueError("expected start and end")
+            start, end = (datetime.fromisoformat(period[key]) for key in ("start", "end"))
+            if start.tzinfo is None or end.tzinfo is None:
+                raise ValueError("timezone is required")
+            start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+            if start >= end or end > datetime.now(timezone.utc):
+                raise ValueError("invalid interval")
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise PublicApiError(
+                "Provide start and end with time zones; the end must be after the start and not in the future",
+                400, "invalid_weight_period",
+            ) from exc
+        instance = prometheus_instance(device.base_url)
+        before = self.prometheus.weight_at(instance, start)
+        after = self.prometheus.weight_at(instance, end)
+        if before is None or after is None:
+            raise PublicApiError(
+                "No weight measurements found for this device in Prometheus",
+                404, "weight_measurement_missing",
+            )
+        difference = after[1] - before[1]
+        return {
+            "device_id": device.id,
+            "start": start.isoformat(), "end": end.isoformat(),
+            "start_sample_at": before[0], "end_sample_at": after[0],
+            "start_weight_g": before[1], "end_weight_g": after[1],
+            "difference_g": difference,
+            "message": (
+                f"Start weight: {before[1]:.2f} g\nEnd weight: {after[1]:.2f} g\n"
+                f"Difference (end − start): {difference:+.2f} g"
+            ),
         }
 
     def project_water_consumption(self, device_id: str) -> dict[str, Any]:

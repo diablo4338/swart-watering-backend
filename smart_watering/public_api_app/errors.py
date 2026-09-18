@@ -2,6 +2,9 @@ from smart_watering.domain import SmartWateringError
 
 
 ERROR_TITLES = {
+    "invalid_weight_period": "Check the start and end of the period",
+    "weight_measurement_missing": "No weight measurements found for this device in Prometheus",
+    "ambiguous_weight_series": "Multiple weight series found for this device in Prometheus",
     "active_operation_not_found": "Operation not found",
     "bad_request": "Invalid request",
     "card_action_not_found": "Action not found",

@@ -251,6 +251,8 @@ def test_v3_device_card_exposes_server_driven_blocks_and_actions() -> None:
         }
         assert controls["sleep_enabled"]["control_type"] == "action_toggle.v1"
         assert controls["capture_zero"]["preset"] == "zero_capture_hold.v1"
+        assert "weight_difference" not in controls
+        assert blocks["watering_history"]["actions"][0]["control_type"] == "date_time_range.v1"
         assert blocks["control"]["data"] == {}
         assert blocks["watering_parameters"]["data"] == {}
         assert blocks["consumption_analysis"]["data"] == {}

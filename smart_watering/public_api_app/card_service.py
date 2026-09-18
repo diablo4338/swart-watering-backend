@@ -121,8 +121,13 @@ class DeviceCardService:
     ) -> dict[str, Any]:
         device = self.business.registry.get_by_id(device_id)
         accepted = True
+        result = None
 
-        if action == "rename-backend":
+        if action == "weight-difference":
+            if set(payload) != {"period"}:
+                raise PublicApiError("Expected period only", 400, "invalid_payload")
+            result = self.device_state.project_weight_difference(device.id, payload["period"])
+        elif action == "rename-backend":
             name = self._require_string(payload, "name")
             device = self.business.registry.rename_backend(device.id, name)
         elif action == "set-device-type":
@@ -215,6 +220,7 @@ class DeviceCardService:
         return {
             "accepted": accepted,
             "card": self.project_card(device.id, include_deferred_data=True),
+            **({"result": result} if result is not None else {}),
         }
 
     def _load_active_operations(self, device_id: str) -> list[dict[str, Any]]:
@@ -315,6 +321,7 @@ class DeviceCardService:
             "kind": "history",
             "slot": "history",
             "title": "Watering history",
+            "actions": [DeviceCardService._weight_difference_action(device)],
             "required": False,
             "data": {},
             "refresh": {
@@ -323,6 +330,17 @@ class DeviceCardService:
                     f"/api/v3/devices/{device.id}/card/blocks/watering_history"
                 ),
             },
+        }
+
+    @staticmethod
+    def _weight_difference_action(device: Any) -> dict[str, Any]:
+        return {
+            "kind": "action", "id": "weight_difference", "label": "Weight difference",
+            "control_type": "date_time_range.v1", "enabled": True,
+            "request": DeviceCardService._advertised_action_request(
+                f"/api/v3/devices/{device.id}/actions/weight-difference",
+                "control_value", property="period",
+            ),
         }
 
     @staticmethod
@@ -637,6 +655,7 @@ class DeviceCardService:
         return {
             "id": "watering_history", "kind": "history", "slot": "history",
             "title": "Watering history", "required": False,
+            "actions": [self._weight_difference_action(device)],
             "schema": {"controls": [{
                 "kind": "action", "id": "collect_statistics", "label": "Collect statistics",
                 "control_type": "button.v1", "enabled": True,

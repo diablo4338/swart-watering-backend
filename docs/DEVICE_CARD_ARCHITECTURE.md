@@ -274,6 +274,45 @@ fertilized flag, and `hold_action.v1` with `history_delete_hold.v1` for deletion
 The API returns up to 50 history items and `next_offset`; the current Android
 renderer does not request further pages.
 
+### Weight difference dialog
+
+The watering-history block advertises a `date_time_range.v1` action labelled
+`Weight difference` in `actions`, including in its initial deferred descriptor.
+Android renders menu-block actions directly below their menu button, so this
+outlined button appears immediately below Watering history without opening it.
+It is separate from the control form and the statistics section.
+Its native Android renderer opens a dialog with start/end dates and 24-hour times
+(initially the previous hour). Both boundaries use the displayed phone timezone
+and are sent as UTC instants. The two date selectors also allow periods spanning
+midnight. Times skipped by DST are rejected; repeated times use the earlier offset.
+`Request` follows the server-provided action URL and uses the existing
+`control_value` binding with property `period`. Only `{period: {start, end}}` is sent.
+The backend validates explicit timezones, start < end, and end <= now.
+
+`POST /api/v3/devices/{device_id}/actions/weight-difference` performs a read-only
+Prometheus query for each boundary, without queueing a device operation. It selects
+`gross_weight_g{instance="<host:port>"}` through raw range selectors in the instant
+query API. It selects the nearest finite raw sample on either side of each boundary;
+ties choose the earlier point. Search windows expand from one hour in both directions
+until a sample is found or all stored history since the Unix epoch has been covered.
+There is no five-minute age limit. The user-approved Prometheus integration exception
+uses `instance` derived from the registered device's delivery URL, just as existing
+consumption statistics do: deployed metrics do not carry `device_id`. The service
+still selects the registry record by `device_id`, and HTTP resources, response DTOs,
+and client state retain that identity. Multiple matching series
+are rejected as ambiguous. Missing or nonfinite endpoint weights return an error;
+zero is a valid measurement. No consumption filtering, smoothing, rate calculation,
+or extrapolation applies: the result is end weight minus start weight in grams.
+
+The ordinary accepted/card action response additionally includes `result`, carrying
+`device_id`, requested UTC boundaries, actual sample timestamps, both endpoint
+weights, `difference_g`, and a server-rendered `message`. Android passes this
+optional result through the generic completion callback and displays the message
+in the dialog, with loading/error/retry states. Both actual sample timestamps are
+displayed as dates and times with seconds and UTC offset in the phone timezone.
+It does not calculate the difference
+or persist it in card/runtime state. Editing either boundary clears the old result.
+
 ### Existing form and action controls
 
 The current renderer uses these identifiers; this list does not propose new controls:
@@ -285,6 +324,7 @@ The current renderer uses these identifiers; this list does not propose new cont
 | `select.v1` | Selection buttons |
 | `readonly.v1` | Read-only text field |
 | `button.v1` | Button with pending state for its HTTP request |
+| `date_time_range.v1` | Button opening a date/time interval dialog and displaying the action result |
 | `action_toggle.v1` | Switch with an optimistic value and HTTP error rollback |
 | `hold_action.v1` | Press-and-hold action |
 
@@ -296,7 +336,8 @@ completes sends no request. The current fallback for an unknown hold preset is
 Forms use `schema.controls` and `data.values`. A field's `commit.request` submits
 its explicitly declared binding. Numeric values are parsed as integer or decimal;
 boolean values are parsed as booleans, and other input is kept as text. There is
-no dedicated slider, local boolean-toggle field, duration, or timestamp editor.
+no dedicated slider, local boolean-toggle field, or duration editor. Date/time
+selection is supported by the interval action dialog described above.
 
 ### Requests and responses
 
