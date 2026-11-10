@@ -74,7 +74,7 @@ services:
       SMART_WATERING_ANDROID_RELEASES_DIR: /releases
     volumes:
       - smart-watering-data:/data
-      - ${SMART_WATERING_ANDROID_RELEASES_DIR:-./releases}:/releases:ro
+      - ${SMART_WATERING_ANDROID_RELEASES_DIR:-/srv/smart-watering/releases}:/releases:ro
 
   cli:
     <<: *python-service

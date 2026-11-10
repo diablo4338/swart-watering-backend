@@ -172,10 +172,11 @@ read-only and exposes:
 - `GET /api/v3/app/releases/{version_code}/download` — the signed APK.
 
 Because the runner, backend and Prometheus are on one machine, configure the same
-absolute directory (for example `/srv/smart-watering/releases`) as both the Android
+absolute directory (default `/srv/smart-watering/releases`) as both the Android
 workflow's `RELEASES_DIR` repository variable and backend
 `SMART_WATERING_ANDROID_RELEASES_DIR`. No file transfer or extra release server is
-needed. Prometheus remains reachable from the containers through
+needed. The backend uses `/srv/smart-watering/releases` when the variable is unset
+or empty. Prometheus remains reachable from the containers through
 `http://host.docker.internal:9090`.
 
 The first release requires an Android tag such as `app-v1.0.0`. See
