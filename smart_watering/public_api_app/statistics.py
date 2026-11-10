@@ -12,6 +12,7 @@ from .errors import PublicApiError
 
 WATER_WEIGHT_METRIC = "gross_weight_g"
 MIN_DETECTED_WATERING_G = 50.0
+DEFAULT_MAX_DETECTED_WATERING_G = 1500.0
 WATERING_DETECTION_WINDOW_SEC = 5 * 60
 WATER_CONSUMPTION_HISTORY_DAYS = 7
 PROMETHEUS_SAMPLE_INTERVAL_SEC = 60
@@ -21,7 +22,7 @@ def detect_watering_events(
     samples: list[tuple[float, float]],
     window_sec: int = WATERING_DETECTION_WINDOW_SEC,
     threshold_g: float = MIN_DETECTED_WATERING_G,
-    max_amount_g: float = 1000.0,
+    max_amount_g: float = DEFAULT_MAX_DETECTED_WATERING_G,
 ) -> list[dict[str, float]]:
     """Detect watering from each rise and the maximum in its next time window."""
     if window_sec <= 0:

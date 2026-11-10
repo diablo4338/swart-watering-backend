@@ -9,6 +9,7 @@ from smart_watering.domain import (
 from smart_watering.public_api_app.statistics import (
     WATER_WEIGHT_METRIC,
     MIN_DETECTED_WATERING_G,
+    DEFAULT_MAX_DETECTED_WATERING_G,
     PrometheusClient,
     detect_watering_events,
     prometheus_instance,
@@ -26,7 +27,6 @@ class DetectionResult:
 
 
 MAX_DETECTED_WATERING_G_ENV = "SMART_WATERING_MAX_DETECTED_WATERING_G"
-DEFAULT_MAX_DETECTED_WATERING_G = 1000.0
 DETECTION_WINDOW_MIN_ENV = "SMART_WATERING_DETECTION_WINDOW_MIN"
 DEFAULT_DETECTION_WINDOW_MIN = 5
 MAX_DEVICE_SAMPLE_INTERVAL_MIN = 50
