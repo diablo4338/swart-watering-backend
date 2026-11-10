@@ -12,6 +12,8 @@ from smart_watering.domain import BackgroundWorker, WorkerState
 from smart_watering.public_api_app.card_service import DeviceCardService
 from smart_watering.public_api_app.errors import PublicApiError
 from smart_watering.public_api_app.statistics import PrometheusClient
+from smart_watering.infrastructure.database import PlantWateringEventRecord
+from sqlalchemy import select
 
 
 @pytest.fixture
@@ -23,6 +25,28 @@ def setup(tmp_path):
     state = SimpleNamespace(project_watering_history=lambda *_: {"waterings": [], "next_offset": None})
     cards = DeviceCardService(SimpleNamespace(business=app, device_state=state))
     return app, device, worker, cards
+
+
+@pytest.mark.parametrize("amount,accepted", [
+    (49.9, False), (50, True), (1111, True), (1500, True),
+    (1500.1, False), (2000, False),
+])
+def test_collection_filters_amount_before_persistence(setup, monkeypatch, amount, accepted):
+    app, device, worker, _ = setup
+    monkeypatch.setenv("SMART_WATERING_MAX_DETECTED_WATERING_G", "1500")
+    now = time.time() - 60
+    samples = [(now - 120, 7102), (now, 7102 + amount)]
+    for _ in range(2):
+        operation_id = app.queue_statistics_collection(device.id)
+        with patch.object(PrometheusClient, "range_samples", return_value=samples):
+            worker.run_until_empty(device.id)
+        assert app.operations.detail(operation_id)["status"] == "success"
+        with app.store.session() as session:
+            rows = session.scalars(select(PlantWateringEventRecord)).all()
+            assert len(rows) == int(accepted)
+            if accepted:
+                assert rows[0].amount_g == amount
+                assert not rows[0].invalid
 
 
 def test_history_refresh_uses_ordinary_operation_queue(setup):

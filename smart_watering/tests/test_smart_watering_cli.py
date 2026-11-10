@@ -304,7 +304,7 @@ def test_detect_watering_events_ignores_rises_below_50_g() -> None:
         ) == []
 
 
-def test_detect_watering_events_does_not_cap_accumulated_gradual_rise() -> None:
+def test_detect_watering_events_rejects_accumulated_gradual_rise_above_limit() -> None:
     samples = [
         (0.0, 1000.0),
         (60.0, 1400.0),
@@ -316,15 +316,7 @@ def test_detect_watering_events_does_not_cap_accumulated_gradual_rise() -> None:
 
     assert statistics.detect_watering_events(
         samples, max_amount_g=1000.0
-    ) == [
-        {
-            "event_start_at": 0.0,
-            "occurred_at": 180.0,
-            "weight_before_g": 1000.0,
-            "weight_after_g": 2200.0,
-            "amount_g": 1200.0,
-        }
-    ]
+    ) == []
 
 
 def test_detect_watering_events_merges_saw_teeth_until_last_rise_is_quiet() -> None:
@@ -464,12 +456,12 @@ def test_detect_watering_events_plant_2_real_samples_2026_07_24() -> None:
     ]
 
 
-def test_detect_watering_events_does_not_reject_positive_values_by_amount() -> None:
+def test_detect_watering_events_rejects_rise_above_max_amount() -> None:
     samples = [(0.0, 100.0), (1200.0, 1101.0)]
 
     assert statistics.detect_watering_events(
         samples, max_amount_g=1000.0
-    )[0]["amount_g"] == 1001.0
+    ) == []
 
 
 def test_detect_watering_events_discards_zero_and_negative_values() -> None:

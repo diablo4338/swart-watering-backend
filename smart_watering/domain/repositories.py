@@ -422,18 +422,6 @@ class PlantWateringEventStore:
             session.flush()
             return self.to_mapping(row)
 
-    def invalidate_above_amount(self, device_id: str, max_amount_g: float) -> int:
-        now = time.time()
-        with self.store.session() as session:
-            result = session.execute(
-                update(PlantWateringEventRecord).where(
-                    PlantWateringEventRecord.device_id == device_id,
-                    PlantWateringEventRecord.invalid == 0,
-                    PlantWateringEventRecord.amount_g > max_amount_g,
-                ).values(invalid=1, updated_at=now)
-            )
-        return int(result.rowcount or 0)
-
     def invalidate_exact_duplicates(self, device_id: str) -> int:
         with self.store.session() as session:
             rows = session.scalars(

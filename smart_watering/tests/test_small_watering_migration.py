@@ -32,7 +32,7 @@ def test_small_waterings_are_soft_deleted_on_upgrade(tmp_path: Path) -> None:
             "SELECT amount_g, invalid, updated_at FROM plant_watering_events ORDER BY id"
         ).fetchall()
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20260913_0014",
+            "20261110_0015",
         )
     assert len(rows) == len(samples)
     assert [row[1] for row in rows] == [1, 1, 0, 0, 1]

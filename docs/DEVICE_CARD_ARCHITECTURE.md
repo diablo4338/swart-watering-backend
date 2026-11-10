@@ -276,6 +276,11 @@ renderer does not request further pages.
 
 ### Weight difference dialog
 
+Watering detection filters candidate increases before persistence: amounts below 50 g
+or above `SMART_WATERING_MAX_DETECTED_WATERING_G` (default 1500 g) are discarded.
+Both boundaries are inclusive. Scans do not mark stored events invalid based on
+this limit. Manual deletions remain invalid and are not recreated by later scans.
+
 The watering-history block advertises a `date_time_range.v1` action labelled
 `Weight difference` in `actions`, including in its initial deferred descriptor.
 Android renders menu-block actions directly below their menu button, so this

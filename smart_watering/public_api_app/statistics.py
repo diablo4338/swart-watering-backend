@@ -54,7 +54,7 @@ def detect_watering_events(
             key=lambda sample: (sample[1], sample[0]),
         )
         amount_g = peak[1] - before[1]
-        if amount_g >= threshold_g:
+        if threshold_g <= amount_g <= max_amount_g:
             events.append(
                 {
                     "event_start_at": before[0],

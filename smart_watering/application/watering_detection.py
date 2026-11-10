@@ -111,9 +111,6 @@ class PlantWateringDetector:
                 break
             chunk_start = chunk_end - overlap
         samples = sorted(samples_by_timestamp.items())
-        self.plant_waterings.invalidate_above_amount(
-            device.id, self.max_amount_g
-        )
         self.plant_waterings.invalidate_exact_duplicates(device.id)
         events = detect_watering_events(
             samples,
